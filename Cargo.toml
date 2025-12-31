@@ -1,0 +1,55 @@
+[package]
+name = "smugmug-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jordan Hofker <jhofker@gmail.com"]
+description = "A command-line tool for uploading photos to SmugMug with deduplication"
+license = "MIT"
+
+[lib]
+name = "smugmug_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "smugmug-cli"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP & API
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+oauth1-request = "0.6"
+hmac = "0.12"
+sha1 = "0.10"
+md5 = "0.7"
+base64 = "0.22"
+
+# CLI & UX
+clap = { version = "4.5", features = ["derive", "env"] }
+indicatif = "0.17"
+colored = "2.1"
+
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+rayon = "1.10"
+
+# File operations
+walkdir = "2.5"
+sha2 = "0.10"
+mime_guess = "2.0"
+
+# Storage
+sled = "0.34"
+directories = "5.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+url = "2.5"
+dialoguer = "0.11"
+dotenvy = "0.15"
