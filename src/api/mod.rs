@@ -7,6 +7,13 @@ pub mod albums;
 pub mod images;
 pub mod upload;
 
+#[derive(Debug)]
+pub struct NodeTree {
+    pub name: String,
+    pub node_type: String,
+    pub children: Vec<NodeTree>,
+}
+
 pub struct SmugMugClient {
     client: reqwest::Client,
     api_key: String,
@@ -75,5 +82,35 @@ impl SmugMugClient {
 
         let body: Value = serde_json::from_str(&body_text)?;
         Ok(body)
+    }
+
+    pub async fn get_with_auth(&self, url: &str) -> Result<reqwest::Response> {
+        let oauth_header = self.build_oauth_header("GET", url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        Ok(self.client
+            .get(url)
+            .headers(headers)
+            .send()
+            .await?)
+    }
+
+    pub async fn post_with_auth(&self, url: &str, body: serde_json::Value) -> Result<reqwest::Response> {
+        let oauth_header = self.build_oauth_header("POST", url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+        headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+
+        Ok(self.client
+            .post(url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?)
     }
 }

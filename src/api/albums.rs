@@ -80,10 +80,6 @@ struct CreateNodeResponseData {
 
 #[derive(Debug, Deserialize)]
 struct NodeInfo {
-    #[serde(rename = "NodeID")]
-    node_id: String,
-    #[serde(rename = "Uri")]
-    uri: String,
     #[serde(rename = "Uris")]
     uris: Option<NodeUris>,
 }
@@ -137,6 +133,7 @@ impl SmugMugClient {
 
         let user_data: UserResponse = serde_json::from_str(&body_text)?;
         let user_uri = user_data.response.user.uri;
+        let user_nickname = user_data.response.user.nickname;
 
         // Now get the albums for this user using the !albums expansion
         let albums_url = format!("https://api.smugmug.com{}!albums", user_uri);
@@ -160,7 +157,16 @@ impl SmugMugClient {
         }
 
         let albums_data: AlbumsResponse = serde_json::from_str(&body_text)?;
-        Ok(albums_data.response.albums)
+
+        // Add web URLs to all albums
+        let mut albums = albums_data.response.albums;
+        for album in &mut albums {
+            if album.web_uri.is_none() {
+                album.web_uri = Some(format!("https://{}.smugmug.com/{}", user_nickname, album.url_name));
+            }
+        }
+
+        Ok(albums)
     }
 
     pub async fn create_album(&self, name: &str, parent_node_uri: Option<&str>) -> Result<Album> {
@@ -323,5 +329,146 @@ impl SmugMugClient {
                 }
             }
         }
+    }
+
+    pub async fn get_node_tree(&self) -> Result<super::NodeTree> {
+        // Get the authenticated user's root node
+        let auth_user_url = "https://api.smugmug.com/api/v2!authuser";
+        let oauth_header = self.build_oauth_header("GET", auth_user_url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let response = self.client
+            .get(auth_user_url)
+            .headers(headers)
+            .send()
+            .await?;
+
+        let body_text = response.text().await?;
+        let user_data: UserResponse = serde_json::from_str(&body_text)?;
+        let root_node_uri = user_data.response.user.uris.node.uri;
+
+        // Fetch the root node and build tree
+        self.fetch_node_tree(&root_node_uri).await
+    }
+
+    fn fetch_node_tree<'a>(&'a self, node_uri: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<super::NodeTree>> + 'a>> {
+        Box::pin(async move {
+        let node_url = format!("https://api.smugmug.com{}", node_uri);
+        let oauth_header = self.build_oauth_header("GET", &node_url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let response = self.client
+            .get(&node_url)
+            .headers(headers)
+            .send()
+            .await?;
+
+        let body_text = response.text().await?;
+
+        #[derive(serde::Deserialize)]
+        struct NodeResponse {
+            #[serde(rename = "Response")]
+            response: NodeResponseData,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct NodeResponseData {
+            #[serde(rename = "Node")]
+            node: NodeData,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct NodeData {
+            #[serde(rename = "Name")]
+            name: String,
+            #[serde(rename = "Type")]
+            node_type: String,
+            #[serde(rename = "HasChildren")]
+            has_children: bool,
+            #[serde(rename = "Uris", skip_serializing_if = "Option::is_none")]
+            uris: Option<NodeChildUris>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct NodeChildUris {
+            #[serde(rename = "ChildNodes")]
+            child_nodes: Option<ChildNodesUri>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ChildNodesUri {
+            #[serde(rename = "Uri")]
+            uri: String,
+        }
+
+        let node_response: NodeResponse = serde_json::from_str(&body_text)?;
+        let node_data = node_response.response.node;
+
+        let mut children = Vec::new();
+
+        // Fetch children if the node has any
+        if node_data.has_children {
+            if let Some(uris) = node_data.uris {
+                if let Some(child_nodes_uri_obj) = uris.child_nodes {
+                    let children_url = format!("https://api.smugmug.com{}", child_nodes_uri_obj.uri);
+                    let oauth_header = self.build_oauth_header("GET", &children_url);
+
+                    let mut headers = HeaderMap::new();
+                    headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+                    headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+                    let response = self.client
+                        .get(&children_url)
+                        .headers(headers)
+                        .send()
+                        .await?;
+
+                    let body_text = response.text().await?;
+
+                    #[derive(serde::Deserialize)]
+                    struct ChildNodesResponse {
+                        #[serde(rename = "Response")]
+                        response: ChildNodesResponseData,
+                    }
+
+                    #[derive(serde::Deserialize)]
+                    struct ChildNodesResponseData {
+                        #[serde(rename = "Node")]
+                        nodes: Vec<ChildNodeData>,
+                    }
+
+                    #[derive(serde::Deserialize)]
+                    struct ChildNodeData {
+                        #[serde(rename = "Uri")]
+                        uri: String,
+                    }
+
+                    let children_response: ChildNodesResponse = serde_json::from_str(&body_text)?;
+
+                    // Recursively fetch each child
+                    for child_node in children_response.response.nodes {
+                        match self.fetch_node_tree(&child_node.uri).await {
+                            Ok(child_tree) => children.push(child_tree),
+                            Err(e) => {
+                                eprintln!("Warning: Failed to fetch child node: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(super::NodeTree {
+            name: node_data.name,
+            node_type: node_data.node_type,
+            children,
+        })
+        })
     }
 }

@@ -6,8 +6,6 @@ pub mod walker;
 #[derive(Debug)]
 pub struct ScannedFile {
     pub path: PathBuf,
-    pub size: u64,
-    pub mime_type: String,
 }
 
 /// Scan a directory recursively for supported image and video files
@@ -25,26 +23,9 @@ pub fn scan_directory(path: &Path) -> Result<Vec<ScannedFile>> {
             continue;
         }
 
-        // Get file metadata
-        match entry.metadata() {
-            Ok(metadata) => {
-                let size = metadata.len();
-                let mime_type = mime_guess::from_path(file_path)
-                    .first_or_octet_stream()
-                    .to_string();
-
-                scanned_files.push(ScannedFile {
-                    path: file_path.to_path_buf(),
-                    size,
-                    mime_type,
-                });
-            }
-            Err(e) => {
-                // Log warning but continue scanning
-                eprintln!("Warning: Could not read metadata for {:?}: {}", file_path, e);
-                continue;
-            }
-        }
+        scanned_files.push(ScannedFile {
+            path: file_path.to_path_buf(),
+        });
     }
 
     Ok(scanned_files)

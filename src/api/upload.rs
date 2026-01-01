@@ -24,10 +24,6 @@ struct UploadResponse {
 struct ImageInfo {
     #[serde(rename = "ImageUri")]
     image_uri: String,
-    #[serde(rename = "AlbumImageUri")]
-    album_image_uri: String,
-    #[serde(rename = "URL")]
-    url: Option<String>,
 }
 
 pub async fn upload_image(

@@ -1,6 +1,34 @@
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 
+#[derive(Debug, Clone)]
+enum UploadMode {
+    SingleAlbum,
+    MaintainStructure,
+}
+
+fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
+    // Print the current node
+    let connector = if is_last { "└── " } else { "├── " };
+    let type_indicator = match node.node_type.as_str() {
+        "Folder" => "📁",
+        "Album" => "📷",
+        _ => "📄",
+    };
+
+    println!("{}{}{} {}", prefix, connector, type_indicator, node.name);
+
+    // Prepare prefix for children
+    let child_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+
+    // Print children
+    let child_count = node.children.len();
+    for (i, child) in node.children.iter().enumerate() {
+        let is_last_child = i == child_count - 1;
+        print_tree(child, &child_prefix, is_last_child);
+    }
+}
+
 mod api;
 mod cache;
 mod config;
@@ -51,6 +79,10 @@ enum Commands {
         /// Check SmugMug for existing files by MD5 hash (slower but more reliable)
         #[arg(long)]
         check_remote: bool,
+
+        /// Disable local cache (always check files, even if previously uploaded)
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Show cache status and statistics
@@ -87,6 +119,9 @@ enum AlbumCommands {
         #[arg(short, long, default_value = "4")]
         threads: usize,
     },
+
+    /// Show folder/album tree structure
+    Tree,
 }
 
 #[derive(Subcommand)]
@@ -213,9 +248,20 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                AlbumCommands::Tree => {
+                    println!("Fetching folder structure...\n");
+                    match client.get_node_tree().await {
+                        Ok(tree) => {
+                            print_tree(&tree, "", true);
+                        }
+                        Err(e) => {
+                            println!("✗ Failed to fetch folder structure: {}", e);
+                        }
+                    }
+                }
             }
         }
-        Commands::Upload { path, threads, album, dry_run, check_remote } => {
+        Commands::Upload { path, threads, album, dry_run, check_remote, no_cache } => {
             let cfg = config::load_config()?;
             let client = std::sync::Arc::new(api::SmugMugClient::new(
                 cfg.auth.api_key,
@@ -224,18 +270,55 @@ async fn main() -> Result<()> {
                 cfg.auth.access_token_secret,
             ));
 
-            // Determine album name
-            let album_name = match album {
-                Some(name) => name,
-                None => {
-                    println!("Error: Album name is required for upload");
-                    println!("Usage: smugmug-cli upload <path> --album <album-name>");
-                    return Ok(());
+            // Determine upload mode and album name
+            let (upload_mode, album_name) = if let Some(name) = album {
+                // Album specified via CLI, use single album mode
+                (UploadMode::SingleAlbum, name)
+            } else {
+                // No album specified, prompt user
+                use dialoguer::{Select, Input};
+
+                println!("\nNo album specified. How would you like to upload?");
+                let choices = vec![
+                    "Single album - flatten all images into one album",
+                    "Maintain folder structure - create albums/folders matching your directory structure",
+                ];
+
+                let selection = Select::new()
+                    .items(&choices)
+                    .default(0)
+                    .interact()?;
+
+                match selection {
+                    0 => {
+                        // Single album mode
+                        let path_obj = std::path::Path::new(&path);
+                        let default_name = path_obj
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Uploads")
+                            .to_string();
+
+                        let album_name: String = Input::new()
+                            .with_prompt("Album name")
+                            .default(default_name)
+                            .interact_text()?;
+
+                        (UploadMode::SingleAlbum, album_name)
+                    }
+                    1 => {
+                        // Maintain structure mode
+                        println!("\nFolder structure will be preserved in SmugMug.");
+                        (UploadMode::MaintainStructure, String::new())
+                    }
+                    _ => unreachable!(),
                 }
             };
 
             println!("Uploading from: {}", path);
-            println!("Album: {}", album_name);
+            if matches!(upload_mode, UploadMode::SingleAlbum) {
+                println!("Album: {}", album_name);
+            }
             println!("Threads: {}", threads);
             if dry_run {
                 println!("DRY RUN - no files will be uploaded\n");
@@ -243,20 +326,7 @@ async fn main() -> Result<()> {
                 println!();
             }
 
-            // Get or create the album
-            println!("Looking up album...");
-            let album = match client.get_or_create_album(&album_name).await {
-                Ok(album) => {
-                    println!("✓ Using album: {} (Key: {})\n", album.name, album.album_key);
-                    album
-                }
-                Err(e) => {
-                    println!("✗ Failed to get/create album: {}", e);
-                    return Ok(());
-                }
-            };
-
-            // Get cache directory
+            // Get cache directory (used by both upload modes)
             let cache_path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "smugmug-cli", "smugmug-cli") {
                 proj_dirs.cache_dir().to_path_buf()
             } else {
@@ -266,29 +336,77 @@ async fn main() -> Result<()> {
             // Create cache directory if it doesn't exist
             std::fs::create_dir_all(&cache_path)?;
 
-            // Set up upload options
-            let upload_options = uploader::UploadOptions {
-                path: std::path::PathBuf::from(path),
-                album,
-                client,
-                threads,
-                dry_run,
-                check_remote,
-                cache_path,
-            };
+            // Handle upload based on mode
+            match upload_mode {
+                UploadMode::SingleAlbum => {
+                    // Get or create the album
+                    println!("Looking up album...");
+                    let album = match client.get_or_create_album(&album_name).await {
+                        Ok(album) => {
+                            println!("✓ Using album: {} (Key: {})", album.name, album.album_key);
+                            if let Some(ref web_uri) = album.web_uri {
+                                println!("  URL: {}", web_uri);
+                            }
+                            println!();
+                            album
+                        }
+                        Err(e) => {
+                            println!("✗ Failed to get/create album: {}", e);
+                            return Ok(());
+                        }
+                    };
 
-            // Perform upload
-            match uploader::upload_files(upload_options).await {
-                Ok(stats) => {
-                    println!("\n✓ Upload complete!");
-                    println!("  Total files: {}", stats.total_files);
-                    println!("  Uploaded: {}", stats.uploaded);
-                    println!("  Skipped (duplicates): {}", stats.skipped);
-                    println!("  Failed: {}", stats.failed);
-                    println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                    // Set up upload options
+                    let upload_options = uploader::UploadOptions {
+                        path: std::path::PathBuf::from(path),
+                        album,
+                        client,
+                        threads,
+                        dry_run,
+                        check_remote,
+                        no_cache,
+                        cache_path,
+                    };
+
+                    // Perform upload
+                    match uploader::upload_files(upload_options).await {
+                        Ok(stats) => {
+                            println!("\n✓ Upload complete!");
+                            println!("  Total files: {}", stats.total_files);
+                            println!("  Uploaded: {}", stats.uploaded);
+                            println!("  Skipped (duplicates): {}", stats.skipped);
+                            println!("  Failed: {}", stats.failed);
+                            println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                        }
+                        Err(e) => {
+                            println!("\n✗ Upload failed: {}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    println!("\n✗ Upload failed: {}", e);
+                UploadMode::MaintainStructure => {
+                    // Upload with folder structure preservation
+                    match uploader::upload_with_structure(uploader::UploadStructureOptions {
+                        path: std::path::PathBuf::from(path),
+                        client: client.clone(),
+                        dry_run,
+                        check_remote,
+                        no_cache,
+                        cache_path,
+                    }).await {
+                        Ok(stats) => {
+                            println!("\n✓ Upload complete!");
+                            println!("  Total files: {}", stats.total_files);
+                            println!("  Uploaded: {}", stats.uploaded);
+                            println!("  Skipped (duplicates): {}", stats.skipped);
+                            println!("  Failed: {}", stats.failed);
+                            println!("  Folders created: {}", stats.folders_created);
+                            println!("  Albums created: {}", stats.albums_created);
+                            println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                        }
+                        Err(e) => {
+                            println!("\n✗ Upload failed: {}", e);
+                        }
+                    }
                 }
             }
         }

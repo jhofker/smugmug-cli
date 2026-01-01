@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 pub mod hash_store;
 
-pub use hash_store::{HashStore, UploadedFile, CacheStats, calculate_file_hash};
+pub use hash_store::HashStore;
 
 /// Get the default cache directory path
 pub fn get_cache_path() -> Result<PathBuf> {

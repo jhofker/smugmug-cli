@@ -1,10 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-use sha2::{Sha256, Digest};
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -76,21 +72,14 @@ impl HashStore {
     /// Get cache statistics
     pub fn stats(&self) -> Result<CacheStats> {
         let mut total_entries = 0;
-        let mut total_size = 0u64;
 
         for item in self.db.iter() {
-            let (_key, value) = item.context("Failed to read database entry")?;
-
-            let file: UploadedFile = serde_json::from_slice(&value)
-                .context("Failed to deserialize UploadedFile")?;
-
+            let (_key, _value) = item.context("Failed to read database entry")?;
             total_entries += 1;
-            total_size += file.file_size;
         }
 
         Ok(CacheStats {
             total_entries,
-            total_size,
         })
     }
 }
@@ -107,29 +96,4 @@ impl Clone for HashStore {
 #[derive(Debug)]
 pub struct CacheStats {
     pub total_entries: usize,
-    pub total_size: u64,
-}
-
-/// Calculate SHA256 hash of a file
-pub fn calculate_file_hash<P: AsRef<Path>>(path: P) -> Result<String> {
-    let file = File::open(path.as_ref())
-        .context("Failed to open file for hashing")?;
-
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192]; // 8KB buffer
-
-    loop {
-        let bytes_read = reader.read(&mut buffer)
-            .context("Failed to read file during hashing")?;
-
-        if bytes_read == 0 {
-            break;
-        }
-
-        hasher.update(&buffer[..bytes_read]);
-    }
-
-    let result = hasher.finalize();
-    Ok(format!("{:x}", result))
 }

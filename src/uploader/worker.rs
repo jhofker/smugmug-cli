@@ -19,6 +19,7 @@ pub struct UploadWorkerContext {
     pub hash_store: Arc<Mutex<HashStore>>,
     pub remote_md5s: Option<Arc<std::collections::HashMap<String, String>>>,
     pub dry_run: bool,
+    pub no_cache: bool,
 }
 
 pub async fn upload_worker(
@@ -29,14 +30,11 @@ pub async fn upload_worker(
     let hash = calculate_file_hash(file_path)
         .with_context(|| "Failed to calculate file hash")?;
 
-    // Check local cache first
-    {
+    // Check local cache first (unless no_cache is enabled)
+    if !context.no_cache {
         let store = context.hash_store.lock().await;
-        if let Some(cached) = store.get(&hash)? {
-            return Ok(UploadStatus::Skipped {
-                reason: format!("Already uploaded (local cache): {}", cached.smugmug_uri),
-                hash,
-            });
+        if let Some(_cached) = store.get(&hash)? {
+            return Ok(UploadStatus::Skipped);
         }
     }
 
@@ -45,11 +43,8 @@ pub async fn upload_worker(
         let md5_hash = calculate_md5_hash(file_path)
             .with_context(|| "Failed to calculate MD5 hash")?;
 
-        if let Some(image_key) = remote_md5s.get(&md5_hash.to_lowercase()) {
-            return Ok(UploadStatus::Skipped {
-                reason: format!("Already exists on SmugMug (image key: {})", image_key),
-                hash,
-            });
+        if remote_md5s.contains_key(&md5_hash.to_lowercase()) {
+            return Ok(UploadStatus::Skipped);
         }
     }
 
@@ -60,7 +55,7 @@ pub async fn upload_worker(
 
     // Skip actual upload if dry run
     if context.dry_run {
-        return Ok(UploadStatus::DryRun { hash, file_size });
+        return Ok(UploadStatus::DryRun { file_size });
     }
 
     // Upload file
@@ -88,26 +83,16 @@ pub async fn upload_worker(
     }
 
     Ok(UploadStatus::Uploaded {
-        hash,
-        image_key: upload_result.image_key,
-        image_uri: upload_result.image_uri,
         file_size,
     })
 }
 
 pub enum UploadStatus {
     Uploaded {
-        hash: String,
-        image_key: String,
-        image_uri: String,
         file_size: u64,
     },
-    Skipped {
-        reason: String,
-        hash: String,
-    },
+    Skipped,
     DryRun {
-        hash: String,
         file_size: u64,
     },
 }
