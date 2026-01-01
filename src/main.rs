@@ -29,6 +29,39 @@ fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
     }
 }
 
+/// Format a number with thousands separators
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let chars: Vec<char> = s.chars().collect();
+
+    for (i, ch) in chars.iter().enumerate() {
+        if i > 0 && (chars.len() - i) % 3 == 0 {
+            result.push(',');
+        }
+        result.push(*ch);
+    }
+
+    result
+}
+
+/// Format bytes into a human-readable string
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
 mod api;
 mod cache;
 mod config;
@@ -57,6 +90,12 @@ enum Commands {
     Albums {
         #[command(subcommand)]
         command: AlbumCommands,
+    },
+
+    /// Image management
+    Images {
+        #[command(subcommand)]
+        command: ImageCommands,
     },
 
     /// Upload photos to SmugMug
@@ -110,6 +149,16 @@ enum AlbumCommands {
         name: String,
     },
 
+    /// Delete an album
+    Delete {
+        /// Album name or key
+        album: String,
+
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Download all images from an album
     Download {
         /// Album name or key
@@ -126,12 +175,114 @@ enum AlbumCommands {
 
     /// Show folder/album tree structure
     Tree,
+
+    /// Update album settings
+    Settings {
+        /// Album name or key
+        album: String,
+
+        /// Set privacy (public, unlisted, private)
+        #[arg(long)]
+        privacy: Option<String>,
+
+        /// Set description
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Set keywords (semicolon-separated)
+        #[arg(long)]
+        keywords: Option<String>,
+
+        /// Set sort method (Position, Caption, FileName, DateTimeOriginal, DateTimeUploaded)
+        #[arg(long)]
+        sort_method: Option<String>,
+
+        /// Set sort direction (asc, desc)
+        #[arg(long)]
+        sort_direction: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
 enum CacheCommands {
     /// Clear the deduplication cache
     Clear,
+}
+
+#[derive(Subcommand)]
+enum ImageCommands {
+    /// List images in an album
+    List {
+        /// Album name or key
+        album: String,
+    },
+
+    /// Show detailed information about an image
+    Info {
+        /// Album name or key
+        album: String,
+
+        /// Image key to view
+        image_key: String,
+    },
+
+    /// Delete an image
+    Delete {
+        /// Album name or key
+        album: String,
+
+        /// Image key to delete
+        image_key: String,
+
+        /// Force deletion without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Update image metadata
+    Update {
+        /// Album name or key
+        album: String,
+
+        /// Image key to update
+        image_key: String,
+
+        /// Set image caption
+        #[arg(long)]
+        caption: Option<String>,
+
+        /// Set image title
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Set keywords (semicolon-separated)
+        #[arg(long)]
+        keywords: Option<String>,
+
+        /// Set latitude
+        #[arg(long)]
+        latitude: Option<f64>,
+
+        /// Set longitude
+        #[arg(long)]
+        longitude: Option<f64>,
+    },
+
+    /// Move image to a different album
+    Move {
+        /// Source album name or key
+        source_album: String,
+
+        /// Image key to move
+        image_key: String,
+
+        /// Target album name or key
+        target_album: String,
+
+        /// Force move without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -211,6 +362,63 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                AlbumCommands::Delete { album, force } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let (album_key, album_info) = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                (found.album_key.clone(), Some(found.clone()))
+                            } else {
+                                // Album not found by name, try using the input as key directly
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Show album details
+                    if let Some(info) = album_info {
+                        println!("\n Album to delete:");
+                        println!("  Name: {}", info.name);
+                        println!("  Key: {}", info.album_key);
+                        if let Some(web_uri) = &info.web_uri {
+                            println!("  URL: {}", web_uri);
+                        }
+                    }
+
+                    // Confirm deletion unless --force is used
+                    if !force {
+                        use dialoguer::Confirm;
+
+                        let confirmed = Confirm::new()
+                            .with_prompt("\nAre you sure you want to delete this album? This cannot be undone.")
+                            .default(false)
+                            .interact()?;
+
+                        if !confirmed {
+                            println!("\n Deletion cancelled.");
+                            return Ok(());
+                        }
+                    }
+
+                    // Delete the album
+                    println!("\nDeleting album...");
+                    match client.delete_album(&album_key).await {
+                        Ok(()) => {
+                            println!("\n✓ Album deleted successfully!");
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to delete album: {}", e);
+                        }
+                    }
+                }
                 AlbumCommands::Download { album, output, threads } => {
                     println!("Downloading album: {}", album);
                     println!("Output directory: {}", output);
@@ -260,6 +468,514 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             println!("✗ Failed to fetch folder structure: {}", e);
+                        }
+                    }
+                }
+                AlbumCommands::Settings { album, privacy, description, keywords, sort_method, sort_direction } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let (album_key, album_info) = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                (found.album_key.clone(), Some(found.clone()))
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Check if any settings were provided
+                    if privacy.is_none() && description.is_none() && keywords.is_none() && sort_method.is_none() && sort_direction.is_none() {
+                        println!("\n✗ No settings specified to update");
+                        println!("  Use --privacy, --description, --keywords, --sort-method, or --sort-direction");
+                        return Ok(());
+                    }
+
+                    // Validate and normalize privacy value
+                    let privacy = if let Some(p) = privacy {
+                        let normalized = match p.to_lowercase().as_str() {
+                            "public" => "Public",
+                            "unlisted" => "Unlisted",
+                            "private" => "Private",
+                            _ => {
+                                println!("\n✗ Invalid privacy value: {}", p);
+                                println!("  Valid values: public, unlisted, private");
+                                return Ok(());
+                            }
+                        };
+                        Some(normalized.to_string())
+                    } else {
+                        None
+                    };
+
+                    // Validate and normalize sort direction
+                    let sort_direction = if let Some(d) = sort_direction {
+                        let normalized = match d.to_lowercase().as_str() {
+                            "asc" | "ascending" => "Ascending",
+                            "desc" | "descending" => "Descending",
+                            _ => {
+                                println!("\n✗ Invalid sort direction: {}", d);
+                                println!("  Valid values: asc, desc");
+                                return Ok(());
+                            }
+                        };
+                        Some(normalized.to_string())
+                    } else {
+                        None
+                    };
+
+                    // Show current album info
+                    if let Some(info) = album_info {
+                        println!("\nAlbum: {}", info.name);
+                        println!("  Key: {}", info.album_key);
+                        if let Some(web_uri) = &info.web_uri {
+                            println!("  URL: {}", web_uri);
+                        }
+                    }
+
+                    // Show what will be updated
+                    println!("\nSettings to update:");
+                    if let Some(ref p) = privacy {
+                        println!("  Privacy: {}", p);
+                    }
+                    if let Some(ref d) = description {
+                        println!("  Description: {}", d);
+                    }
+                    if let Some(ref k) = keywords {
+                        println!("  Keywords: {}", k);
+                    }
+                    if let Some(ref sm) = sort_method {
+                        println!("  Sort Method: {}", sm);
+                    }
+                    if let Some(ref sd) = sort_direction {
+                        println!("  Sort Direction: {}", sd);
+                    }
+
+                    // Create settings update struct
+                    let settings = api::albums::AlbumSettingsUpdate {
+                        privacy,
+                        description,
+                        keywords,
+                        sort_method,
+                        sort_direction,
+                    };
+
+                    println!("\nUpdating album settings...");
+                    match client.update_album_settings(&album_key, settings).await {
+                        Ok(()) => {
+                            println!("\n✓ Album settings updated successfully!");
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to update album settings: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Images { command } => {
+            let cfg = config::load_config()?;
+            let client = std::sync::Arc::new(api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            ));
+
+            match command {
+                ImageCommands::List { album } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let album_key = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    println!("Fetching images from album...\n");
+                    match client.list_album_images(&album_key).await {
+                        Ok(images) => {
+                            if images.is_empty() {
+                                println!("No images found in this album.");
+                            } else {
+                                println!("✓ Found {} images:\n", format_number(images.len()));
+                                for image in images {
+                                    println!("  Image Key: {}", image.image_key);
+                                    println!("    File: {}", image.file_name);
+                                    println!("    Size: {}", format_size(image.file_size));
+                                    println!("    Format: {}", image.format);
+                                    if let Some(title) = &image.title {
+                                        println!("    Title: {}", title);
+                                    }
+                                    if let Some(md5) = &image.archived_md5 {
+                                        println!("    MD5: {}", md5);
+                                    }
+                                    println!();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list images: {}", e);
+                        }
+                    }
+                }
+                ImageCommands::Info { album, image_key } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let album_key_resolved = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Verify the image exists in the album
+                    println!("Verifying image exists in album...");
+                    let image_exists = match client.list_album_images(&album_key_resolved).await {
+                        Ok(images) => {
+                            images.iter().any(|img| img.image_key == image_key)
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to verify image: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    if !image_exists {
+                        println!("\n✗ Image not found in album: {}", image_key);
+                        println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                        return Ok(());
+                    }
+
+                    // Fetch detailed image information
+                    println!("Fetching image details...\n");
+                    match client.get_image_details(&image_key).await {
+                        Ok(details) => {
+                            println!("✓ Image Details\n");
+                            println!("Basic Information:");
+                            println!("  Image Key:     {}", details.image_key);
+                            println!("  File Name:     {}", details.file_name);
+                            println!("  Format:        {}", details.format);
+                            println!("  File Size:     {}", format_size(details.file_size));
+                            println!();
+
+                            println!("Metadata:");
+                            println!("  Title:         {}", details.title.as_deref().unwrap_or("N/A"));
+                            println!("  Caption:       {}", details.caption.as_deref().unwrap_or("N/A"));
+                            println!("  Keywords:      {}", details.keywords.as_deref().unwrap_or("N/A"));
+                            println!();
+
+                            println!("Location:");
+                            if let Some(lat) = details.latitude {
+                                println!("  Latitude:      {}", lat);
+                            } else {
+                                println!("  Latitude:      N/A");
+                            }
+                            if let Some(lon) = details.longitude {
+                                println!("  Longitude:     {}", lon);
+                            } else {
+                                println!("  Longitude:     N/A");
+                            }
+                            if let Some(alt) = details.altitude {
+                                println!("  Altitude:      {} m", alt);
+                            } else {
+                                println!("  Altitude:      N/A");
+                            }
+                            println!();
+
+                            println!("Technical:");
+                            println!("  Archived URI:  {}", details.archived_uri);
+                            println!("  Archived MD5:  {}", details.archived_md5.as_deref().unwrap_or("N/A"));
+                            println!("  Upload Key:    {}", details.upload_key.as_deref().unwrap_or("N/A"));
+                            println!("  API URI:       {}", details.uri);
+                            if let Some(web_uri) = &details.web_uri {
+                                println!("  Web URL:       {}", web_uri);
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to fetch image details: {}", e);
+                        }
+                    }
+                }
+                ImageCommands::Delete { album, image_key, force } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let album_key_resolved = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Verify the image exists in the album
+                    println!("Verifying image exists...");
+                    let image_info = match client.list_album_images(&album_key_resolved).await {
+                        Ok(images) => {
+                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                                found.clone()
+                            } else {
+                                println!("\n✗ Image not found in album: {}", image_key);
+                                println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list images: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Show confirmation prompt unless --force is specified
+                    if !force {
+                        use dialoguer::Confirm;
+
+                        println!("\nImage details:");
+                        println!("  File: {}", image_info.file_name);
+                        println!("  Key: {}", image_info.image_key);
+                        println!("  Size: {}", format_size(image_info.file_size));
+                        println!("  Format: {}", image_info.format);
+
+                        let confirmed = Confirm::new()
+                            .with_prompt("Are you sure you want to delete this image?")
+                            .default(false)
+                            .interact()?;
+
+                        if !confirmed {
+                            println!("\nDeletion cancelled.");
+                            return Ok(());
+                        }
+                    }
+
+                    println!("\nDeleting image...");
+                    match client.delete_image(&image_key).await {
+                        Ok(()) => {
+                            println!("\n✓ Image deleted successfully!");
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to delete image: {}", e);
+                        }
+                    }
+                }
+                ImageCommands::Update { album, image_key, caption, title, keywords, latitude, longitude } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let album_key_resolved = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Verify the image exists in the album
+                    println!("Verifying image exists...");
+                    let image_info = match client.list_album_images(&album_key_resolved).await {
+                        Ok(images) => {
+                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                                found.clone()
+                            } else {
+                                println!("\n✗ Image not found in album: {}", image_key);
+                                println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list images: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Check if any updates were provided
+                    if caption.is_none() && title.is_none() && keywords.is_none() && latitude.is_none() && longitude.is_none() {
+                        println!("\n✗ No metadata fields specified to update");
+                        println!("  Use --caption, --title, --keywords, --latitude, or --longitude");
+                        return Ok(());
+                    }
+
+                    // Show current image info
+                    println!("\nImage details:");
+                    println!("  File: {}", image_info.file_name);
+                    println!("  Key: {}", image_info.image_key);
+                    println!("  Size: {}", format_size(image_info.file_size));
+                    println!("  Format: {}", image_info.format);
+
+                    // Show what will be updated
+                    println!("\nMetadata updates:");
+                    if let Some(ref c) = caption {
+                        println!("  Caption: {}", c);
+                    }
+                    if let Some(ref t) = title {
+                        println!("  Title: {}", t);
+                    }
+                    if let Some(ref k) = keywords {
+                        println!("  Keywords: {}", k);
+                    }
+                    if let Some(lat) = latitude {
+                        println!("  Latitude: {}", lat);
+                    }
+                    if let Some(lon) = longitude {
+                        println!("  Longitude: {}", lon);
+                    }
+
+                    // Create metadata update struct
+                    let metadata = api::images::ImageMetadataUpdate {
+                        caption,
+                        title,
+                        keywords,
+                        latitude,
+                        longitude,
+                    };
+
+                    println!("\nUpdating image metadata...");
+                    match client.update_image_metadata(&image_key, metadata).await {
+                        Ok(()) => {
+                            println!("\n✓ Image metadata updated successfully!");
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to update image metadata: {}", e);
+                        }
+                    }
+                }
+                ImageCommands::Move { source_album, image_key, target_album, force } => {
+                    println!("Looking up source album: {}", source_album);
+
+                    // Try to find source album by name or use as key
+                    let (source_album_key, source_album_name) = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == source_album || a.album_key == source_album) {
+                                (found.album_key.clone(), found.name.clone())
+                            } else {
+                                println!("\n✗ Source album not found: {}", source_album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Verify the image exists in the source album
+                    println!("Verifying image exists in source album...");
+                    let image_info = match client.list_album_images(&source_album_key).await {
+                        Ok(images) => {
+                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                                found.clone()
+                            } else {
+                                println!("\n✗ Image not found in source album: {}", image_key);
+                                println!("  Use 'smugmug-cli images list {}' to see available images", source_album);
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list images in source album: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Try to find target album by name or use as key
+                    println!("Looking up target album: {}", target_album);
+                    let (target_album_key, target_album_name) = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == target_album || a.album_key == target_album) {
+                                (found.album_key.clone(), found.name.clone())
+                            } else {
+                                println!("\n✗ Target album not found: {}", target_album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Show confirmation prompt unless --force is specified
+                    if !force {
+                        use dialoguer::Confirm;
+
+                        println!("\nImage details:");
+                        println!("  File: {}", image_info.file_name);
+                        println!("  Key: {}", image_info.image_key);
+                        println!("  Size: {}", format_size(image_info.file_size));
+                        println!("  Format: {}", image_info.format);
+                        if let Some(title) = &image_info.title {
+                            println!("  Title: {}", title);
+                        }
+                        println!();
+                        println!("Move from:");
+                        println!("  Album: {} (Key: {})", source_album_name, source_album_key);
+                        println!("To:");
+                        println!("  Album: {} (Key: {})", target_album_name, target_album_key);
+
+                        let confirmed = Confirm::new()
+                            .with_prompt("Are you sure you want to move this image?")
+                            .default(false)
+                            .interact()?;
+
+                        if !confirmed {
+                            println!("\nMove cancelled.");
+                            return Ok(());
+                        }
+                    }
+
+                    println!("\nMoving image...");
+                    match client.move_image(&image_key, &target_album_key).await {
+                        Ok(()) => {
+                            println!("\n✓ Image moved successfully!");
+                            println!("  From: {}", source_album_name);
+                            println!("  To: {}", target_album_name);
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to move image: {}", e);
                         }
                     }
                 }
@@ -468,8 +1184,39 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Status => {
-            println!("Cache status:");
-            // TODO: Implement status
+            let cache_path = cache::get_cache_path()?;
+
+            println!("Cache Status:");
+            println!("  Location: {}", cache_path.display());
+
+            match cache::HashStore::new(cache_path.to_str().unwrap()) {
+                Ok(store) => {
+                    match store.stats() {
+                        Ok(stats) => {
+                            println!("  Total entries: {}", format_number(stats.total_entries));
+                            println!("  Cache size: {}", format_size(stats.total_size));
+
+                            if let Some(oldest) = stats.oldest_entry {
+                                println!("  Oldest entry: {}", oldest.format("%Y-%m-%d"));
+                            } else {
+                                println!("  Oldest entry: N/A");
+                            }
+
+                            if let Some(newest) = stats.newest_entry {
+                                println!("  Newest entry: {}", newest.format("%Y-%m-%d"));
+                            } else {
+                                println!("  Newest entry: N/A");
+                            }
+                        }
+                        Err(e) => {
+                            println!("  Error retrieving stats: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("  Error opening cache: {}", e);
+                }
+            }
         }
         Commands::Cache { command } => {
             match command {
@@ -482,4 +1229,77 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_number_zero() {
+        assert_eq!(format_number(0), "0");
+    }
+
+    #[test]
+    fn test_format_number_small() {
+        assert_eq!(format_number(123), "123");
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn test_format_number_thousands() {
+        assert_eq!(format_number(1000), "1,000");
+        assert_eq!(format_number(1234), "1,234");
+        assert_eq!(format_number(9999), "9,999");
+    }
+
+    #[test]
+    fn test_format_number_millions() {
+        assert_eq!(format_number(1000000), "1,000,000");
+        assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn test_format_number_large() {
+        assert_eq!(format_number(1234567890), "1,234,567,890");
+    }
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(0), "0 bytes");
+        assert_eq!(format_size(1), "1 bytes");
+        assert_eq!(format_size(512), "512 bytes");
+        assert_eq!(format_size(1023), "1023 bytes");
+    }
+
+    #[test]
+    fn test_format_size_kb() {
+        assert_eq!(format_size(1024), "1.00 KB");
+        assert_eq!(format_size(1536), "1.50 KB");
+        assert_eq!(format_size(10240), "10.00 KB");
+        assert_eq!(format_size(1024 * 1024 - 1), "1024.00 KB");
+    }
+
+    #[test]
+    fn test_format_size_mb() {
+        assert_eq!(format_size(1024 * 1024), "1.00 MB");
+        assert_eq!(format_size(1024 * 1024 * 5), "5.00 MB");
+        assert_eq!(format_size(1024 * 1024 + 512 * 1024), "1.50 MB");
+        assert_eq!(format_size(1024 * 1024 * 1024 - 1), "1024.00 MB");
+    }
+
+    #[test]
+    fn test_format_size_gb() {
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
+        assert_eq!(format_size(1024u64 * 1024 * 1024 * 5), "5.00 GB");
+        assert_eq!(format_size(1024u64 * 1024 * 1024 + 512 * 1024 * 1024), "1.50 GB");
+    }
+
+    #[test]
+    fn test_format_size_precision() {
+        // Test that we maintain 2 decimal places
+        assert_eq!(format_size(1536), "1.50 KB");
+        assert_eq!(format_size(1587), "1.55 KB");
+        assert_eq!(format_size(1024 + 10), "1.01 KB");
+    }
 }

@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use std::fs::File;
 use std::io::Write;
-use smugmug_cli::cache::{HashStore, UploadedFile, calculate_file_hash};
+use smugmug_cli::cache::hash_store::{HashStore, UploadedFile};
+use smugmug_cli::uploader::calculate_file_hash;
 
 #[test]
 fn test_hash_calculation() -> Result<()> {
@@ -17,7 +18,7 @@ fn test_hash_calculation() -> Result<()> {
 
     // Verify it's a valid SHA256 hash (64 hex characters)
     assert_eq!(hash.len(), 64);
-    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(hash.chars().all(|c: char| c.is_ascii_hexdigit()));
 
     // Calculate again to verify consistency
     let hash2 = calculate_file_hash(&test_file)?;

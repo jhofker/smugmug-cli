@@ -2,7 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use std::fs::File;
 use std::io::Write;
-use smugmug_cli::cache::{HashStore, UploadedFile, calculate_file_hash};
+use smugmug_cli::cache::hash_store::{HashStore, UploadedFile};
+use smugmug_cli::uploader::calculate_file_hash;
 
 fn main() -> Result<()> {
     println!("SmugMug CLI - Cache System Demo");

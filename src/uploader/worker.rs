@@ -97,7 +97,7 @@ pub enum UploadStatus {
     },
 }
 
-fn calculate_file_hash(file_path: &Path) -> Result<String> {
+pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
     let file = File::open(file_path)?;
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();

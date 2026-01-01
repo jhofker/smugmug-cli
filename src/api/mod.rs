@@ -51,6 +51,8 @@ impl SmugMugClient {
         match method {
             "GET" => oauth::get(url, &(), &token, signer),
             "POST" => oauth::post(url, &(), &token, signer),
+            "DELETE" => oauth::delete(url, &(), &token, signer),
+            "PATCH" => oauth::patch(url, &(), &token, signer),
             _ => oauth::get(url, &(), &token, signer),
         }
     }
@@ -113,6 +115,36 @@ impl SmugMugClient {
             .send()
             .await?)
     }
+
+    pub async fn delete_with_auth(&self, url: &str) -> Result<reqwest::Response> {
+        let oauth_header = self.build_oauth_header("DELETE", url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        Ok(self.client
+            .delete(url)
+            .headers(headers)
+            .send()
+            .await?)
+    }
+
+    pub async fn patch_with_auth(&self, url: &str, body: serde_json::Value) -> Result<reqwest::Response> {
+        let oauth_header = self.build_oauth_header("PATCH", url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+        headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+
+        Ok(self.client
+            .patch(url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?)
+    }
 }
 
 #[cfg(test)]
@@ -167,11 +199,37 @@ mod tests {
     }
 
     #[test]
+    fn test_build_oauth_header_delete() {
+        let client = create_test_client();
+        let url = "https://api.smugmug.com/api/v2/image/IMG123";
+        let header = client.build_oauth_header("DELETE", url);
+
+        // Verify the header starts with "OAuth " and contains required parameters
+        assert!(header.starts_with("OAuth "));
+        assert!(header.contains("oauth_consumer_key=\"test_api_key\""));
+        assert!(header.contains("oauth_token=\"test_access_token\""));
+        assert!(header.contains("oauth_signature_method=\"HMAC-SHA1\""));
+    }
+
+    #[test]
+    fn test_build_oauth_header_patch() {
+        let client = create_test_client();
+        let url = "https://api.smugmug.com/api/v2/image/IMG123";
+        let header = client.build_oauth_header("PATCH", url);
+
+        // Verify the header starts with "OAuth " and contains required parameters
+        assert!(header.starts_with("OAuth "));
+        assert!(header.contains("oauth_consumer_key=\"test_api_key\""));
+        assert!(header.contains("oauth_token=\"test_access_token\""));
+        assert!(header.contains("oauth_signature_method=\"HMAC-SHA1\""));
+    }
+
+    #[test]
     fn test_build_oauth_header_unknown_method() {
         let client = create_test_client();
         let url = "https://api.smugmug.com/api/v2!authuser";
         // Unknown methods should default to GET behavior
-        let header = client.build_oauth_header("DELETE", url);
+        let header = client.build_oauth_header("PUT", url);
 
         assert!(header.starts_with("OAuth "));
         assert!(header.contains("oauth_consumer_key=\"test_api_key\""));

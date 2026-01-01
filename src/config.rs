@@ -77,21 +77,44 @@ pub async fn init_config() -> Result<()> {
     println!("3. Go to your SmugMug Account Settings > Privacy > Authorized Services");
     println!("4. Click 'token' next to your application to get your Access Token and Secret\n");
 
-    let api_key: String = Input::new()
-        .with_prompt("API Key")
-        .interact_text()?;
+    // Try to load defaults from .env file (if it exists)
+    let _ = dotenvy::dotenv();
+    let env_api_key = std::env::var("SMUGMUG_API_KEY").ok();
+    let env_api_secret = std::env::var("SMUGMUG_API_SECRET").ok();
+    let env_access_token = std::env::var("SMUGMUG_ACCESS_TOKEN").ok();
+    let env_access_token_secret = std::env::var("SMUGMUG_ACCESS_TOKEN_SECRET").ok();
 
-    let api_secret: String = Input::new()
-        .with_prompt("API Secret")
-        .interact_text()?;
+    let api_key: String = {
+        let mut input = Input::new().with_prompt("API Key");
+        if let Some(default) = env_api_key {
+            input = input.with_initial_text(default);
+        }
+        input.interact_text()?
+    };
 
-    let access_token: String = Input::new()
-        .with_prompt("Access Token")
-        .interact_text()?;
+    let api_secret: String = {
+        let mut input = Input::new().with_prompt("API Secret");
+        if let Some(default) = env_api_secret {
+            input = input.with_initial_text(default);
+        }
+        input.interact_text()?
+    };
 
-    let access_token_secret: String = Input::new()
-        .with_prompt("Access Token Secret")
-        .interact_text()?;
+    let access_token: String = {
+        let mut input = Input::new().with_prompt("Access Token");
+        if let Some(default) = env_access_token {
+            input = input.with_initial_text(default);
+        }
+        input.interact_text()?
+    };
+
+    let access_token_secret: String = {
+        let mut input = Input::new().with_prompt("Access Token Secret");
+        if let Some(default) = env_access_token_secret {
+            input = input.with_initial_text(default);
+        }
+        input.interact_text()?
+    };
 
     let mut config = Config::default();
     config.auth.api_key = api_key;
@@ -109,20 +132,13 @@ pub async fn init_config() -> Result<()> {
 }
 
 pub fn load_config() -> Result<Config> {
-    // Try to load from environment variables first
-    if let Ok(config) = load_from_env() {
-        return Ok(config);
-    }
-
-    // Fall back to config file
     let config_path = get_config_path()?;
 
     if !config_path.exists() {
         anyhow::bail!(
-            "Config not found. Either:\n\
-             1. Run 'smugmug-cli init' to create config file at: {}\n\
-             2. Set environment variables: SMUGMUG_API_KEY, SMUGMUG_API_SECRET, SMUGMUG_ACCESS_TOKEN, SMUGMUG_ACCESS_TOKEN_SECRET\n\
-             3. Create a .env file with these variables",
+            "Config file not found at: {}\n\n\
+             Run 'smugmug-cli init' to create your configuration.\n\
+             (Tip: You can create a .env file with your credentials, and init will use them as defaults)",
             config_path.display()
         );
     }
@@ -132,24 +148,6 @@ pub fn load_config() -> Result<Config> {
 
     let config: Config = toml::from_str(&contents)
         .context("Failed to parse config file")?;
-
-    Ok(config)
-}
-
-fn load_from_env() -> Result<Config> {
-    // Try to load .env file (silently ignore if it doesn't exist)
-    let _ = dotenvy::dotenv();
-
-    let api_key = std::env::var("SMUGMUG_API_KEY")?;
-    let api_secret = std::env::var("SMUGMUG_API_SECRET")?;
-    let access_token = std::env::var("SMUGMUG_ACCESS_TOKEN")?;
-    let access_token_secret = std::env::var("SMUGMUG_ACCESS_TOKEN_SECRET")?;
-
-    let mut config = Config::default();
-    config.auth.api_key = api_key;
-    config.auth.api_secret = api_secret;
-    config.auth.access_token = access_token;
-    config.auth.access_token_secret = access_token_secret;
 
     Ok(config)
 }
@@ -333,124 +331,6 @@ cache_path = "/tmp/cache.db"
 
         let result: Result<Config, _> = toml::from_str(invalid_toml);
         assert!(result.is_err(), "Should fail when field has wrong type");
-    }
-
-    #[test]
-    fn test_load_from_env_success() {
-        // Save current env vars
-        let saved_key = env::var("SMUGMUG_API_KEY").ok();
-        let saved_secret = env::var("SMUGMUG_API_SECRET").ok();
-        let saved_token = env::var("SMUGMUG_ACCESS_TOKEN").ok();
-        let saved_token_secret = env::var("SMUGMUG_ACCESS_TOKEN_SECRET").ok();
-
-        // Set environment variables
-        env::set_var("SMUGMUG_API_KEY", "env_api_key");
-        env::set_var("SMUGMUG_API_SECRET", "env_api_secret");
-        env::set_var("SMUGMUG_ACCESS_TOKEN", "env_access_token");
-        env::set_var("SMUGMUG_ACCESS_TOKEN_SECRET", "env_access_token_secret");
-
-        let result = load_from_env();
-
-        // Clean up environment variables - restore originals
-        if let Some(key) = saved_key {
-            env::set_var("SMUGMUG_API_KEY", key);
-        } else {
-            env::remove_var("SMUGMUG_API_KEY");
-        }
-        if let Some(secret) = saved_secret {
-            env::set_var("SMUGMUG_API_SECRET", secret);
-        } else {
-            env::remove_var("SMUGMUG_API_SECRET");
-        }
-        if let Some(token) = saved_token {
-            env::set_var("SMUGMUG_ACCESS_TOKEN", token);
-        } else {
-            env::remove_var("SMUGMUG_ACCESS_TOKEN");
-        }
-        if let Some(token_secret) = saved_token_secret {
-            env::set_var("SMUGMUG_ACCESS_TOKEN_SECRET", token_secret);
-        } else {
-            env::remove_var("SMUGMUG_ACCESS_TOKEN_SECRET");
-        }
-
-        assert!(result.is_ok(), "Should successfully load from environment variables");
-        let config = result.unwrap();
-        assert_eq!(config.auth.api_key, "env_api_key");
-        assert_eq!(config.auth.api_secret, "env_api_secret");
-        assert_eq!(config.auth.access_token, "env_access_token");
-        assert_eq!(config.auth.access_token_secret, "env_access_token_secret");
-
-        // Should use default values for upload and deduplication
-        assert_eq!(config.upload.threads, 4);
-        assert_eq!(config.upload.retry_attempts, 3);
-        assert_eq!(config.upload.timeout_seconds, 300);
-        assert!(config.deduplication.enabled);
-    }
-
-    #[test]
-    fn test_load_from_env_missing_variables() {
-        // Note: This test may pass if .env file exists with required variables
-        // The load_from_env() function uses dotenvy which loads from .env files
-        // So we test that the function either fails (no .env) or succeeds (has .env)
-
-        // Temporarily save current env vars
-        let saved_key = env::var("SMUGMUG_API_KEY").ok();
-        let saved_secret = env::var("SMUGMUG_API_SECRET").ok();
-        let saved_token = env::var("SMUGMUG_ACCESS_TOKEN").ok();
-        let saved_token_secret = env::var("SMUGMUG_ACCESS_TOKEN_SECRET").ok();
-
-        // Remove all env vars
-        env::remove_var("SMUGMUG_API_KEY");
-        env::remove_var("SMUGMUG_API_SECRET");
-        env::remove_var("SMUGMUG_ACCESS_TOKEN");
-        env::remove_var("SMUGMUG_ACCESS_TOKEN_SECRET");
-
-        let result = load_from_env();
-
-        // Restore env vars
-        if let Some(key) = saved_key { env::set_var("SMUGMUG_API_KEY", key); }
-        if let Some(secret) = saved_secret { env::set_var("SMUGMUG_API_SECRET", secret); }
-        if let Some(token) = saved_token { env::set_var("SMUGMUG_ACCESS_TOKEN", token); }
-        if let Some(token_secret) = saved_token_secret { env::set_var("SMUGMUG_ACCESS_TOKEN_SECRET", token_secret); }
-
-        // Test passes if either:
-        // 1. Function fails (no .env file or empty .env)
-        // 2. Function succeeds (has .env file with values)
-        // Both are valid behaviors depending on environment
-        assert!(result.is_ok() || result.is_err(), "Function should return either Ok or Err");
-    }
-
-    #[test]
-    fn test_load_from_env_partial_variables() {
-        // Note: This test may pass if .env file exists with all required variables
-        // The load_from_env() function uses dotenvy which loads from .env files
-
-        // Save current env vars
-        let saved_key = env::var("SMUGMUG_API_KEY").ok();
-        let saved_secret = env::var("SMUGMUG_API_SECRET").ok();
-        let saved_token = env::var("SMUGMUG_ACCESS_TOKEN").ok();
-        let saved_token_secret = env::var("SMUGMUG_ACCESS_TOKEN_SECRET").ok();
-
-        // Set only some environment variables
-        env::set_var("SMUGMUG_API_KEY", "env_api_key");
-        env::set_var("SMUGMUG_API_SECRET", "env_api_secret");
-        env::remove_var("SMUGMUG_ACCESS_TOKEN");
-        env::remove_var("SMUGMUG_ACCESS_TOKEN_SECRET");
-
-        let result = load_from_env();
-
-        // Clean up - restore original vars
-        env::remove_var("SMUGMUG_API_KEY");
-        env::remove_var("SMUGMUG_API_SECRET");
-        if let Some(key) = saved_key { env::set_var("SMUGMUG_API_KEY", key); }
-        if let Some(secret) = saved_secret { env::set_var("SMUGMUG_API_SECRET", secret); }
-        if let Some(token) = saved_token { env::set_var("SMUGMUG_ACCESS_TOKEN", token); }
-        if let Some(token_secret) = saved_token_secret { env::set_var("SMUGMUG_ACCESS_TOKEN_SECRET", token_secret); }
-
-        // Test passes if either:
-        // 1. Function fails (partial vars, no .env補足)
-        // 2. Function succeeds (.env file has all required vars)
-        assert!(result.is_ok() || result.is_err(), "Function should return either Ok or Err");
     }
 
     #[test]

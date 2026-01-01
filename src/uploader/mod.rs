@@ -14,6 +14,7 @@ use crate::cache::hash_store::HashStore;
 use crate::scanner::scan_directory;
 use queue::UploadQueue;
 use worker::{upload_worker, UploadStatus, UploadWorkerContext};
+pub use worker::calculate_file_hash;
 
 pub struct UploadOptions {
     pub path: PathBuf,
