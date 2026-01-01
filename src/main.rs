@@ -4,6 +4,7 @@ use anyhow::Result;
 mod api;
 mod cache;
 mod config;
+mod downloader;
 mod scanner;
 mod uploader;
 
@@ -46,6 +47,10 @@ enum Commands {
         /// Dry run - don't actually upload
         #[arg(short = 'n', long)]
         dry_run: bool,
+
+        /// Check SmugMug for existing files by MD5 hash (slower but more reliable)
+        #[arg(long)]
+        check_remote: bool,
     },
 
     /// Show cache status and statistics
@@ -67,6 +72,20 @@ enum AlbumCommands {
     Create {
         /// Album name
         name: String,
+    },
+
+    /// Download all images from an album
+    Download {
+        /// Album name or key
+        album: String,
+
+        /// Output directory
+        #[arg(short, long, default_value = ".")]
+        output: String,
+
+        /// Number of concurrent download threads
+        #[arg(short, long, default_value = "4")]
+        threads: usize,
     },
 }
 
@@ -110,12 +129,12 @@ async fn main() -> Result<()> {
         }
         Commands::Albums { command } => {
             let cfg = config::load_config()?;
-            let client = api::SmugMugClient::new(
+            let client = std::sync::Arc::new(api::SmugMugClient::new(
                 cfg.auth.api_key,
                 cfg.auth.api_secret,
                 cfg.auth.access_token,
                 cfg.auth.access_token_secret,
-            );
+            ));
 
             match command {
                 AlbumCommands::List => {
@@ -153,18 +172,125 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                AlbumCommands::Download { album, output, threads } => {
+                    println!("Downloading album: {}", album);
+                    println!("Output directory: {}", output);
+                    println!("Threads: {}\n", threads);
+
+                    // Try to find album by name or use as key
+                    let album_key = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("✗ Album not found: {}", album);
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    let download_options = downloader::DownloadOptions {
+                        album_key,
+                        output_dir: std::path::PathBuf::from(output),
+                        client,
+                        threads,
+                    };
+
+                    match downloader::download_album(download_options).await {
+                        Ok(stats) => {
+                            println!("\n✓ Download complete!");
+                            println!("  Total images: {}", stats.total_images);
+                            println!("  Downloaded: {}", stats.downloaded);
+                            println!("  Failed: {}", stats.failed);
+                            println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                        }
+                        Err(e) => {
+                            println!("\n✗ Download failed: {}", e);
+                        }
+                    }
+                }
             }
         }
-        Commands::Upload { path, threads, album, dry_run } => {
+        Commands::Upload { path, threads, album, dry_run, check_remote } => {
+            let cfg = config::load_config()?;
+            let client = std::sync::Arc::new(api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            ));
+
+            // Determine album name
+            let album_name = match album {
+                Some(name) => name,
+                None => {
+                    println!("Error: Album name is required for upload");
+                    println!("Usage: smugmug-cli upload <path> --album <album-name>");
+                    return Ok(());
+                }
+            };
+
             println!("Uploading from: {}", path);
+            println!("Album: {}", album_name);
             println!("Threads: {}", threads);
-            if let Some(album_name) = album {
-                println!("Album: {}", album_name);
-            }
             if dry_run {
-                println!("DRY RUN - no files will be uploaded");
+                println!("DRY RUN - no files will be uploaded\n");
+            } else {
+                println!();
             }
-            // TODO: Implement upload
+
+            // Get or create the album
+            println!("Looking up album...");
+            let album = match client.get_or_create_album(&album_name).await {
+                Ok(album) => {
+                    println!("✓ Using album: {} (Key: {})\n", album.name, album.album_key);
+                    album
+                }
+                Err(e) => {
+                    println!("✗ Failed to get/create album: {}", e);
+                    return Ok(());
+                }
+            };
+
+            // Get cache directory
+            let cache_path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "smugmug-cli", "smugmug-cli") {
+                proj_dirs.cache_dir().to_path_buf()
+            } else {
+                std::path::PathBuf::from(".cache")
+            };
+
+            // Create cache directory if it doesn't exist
+            std::fs::create_dir_all(&cache_path)?;
+
+            // Set up upload options
+            let upload_options = uploader::UploadOptions {
+                path: std::path::PathBuf::from(path),
+                album,
+                client,
+                threads,
+                dry_run,
+                check_remote,
+                cache_path,
+            };
+
+            // Perform upload
+            match uploader::upload_files(upload_options).await {
+                Ok(stats) => {
+                    println!("\n✓ Upload complete!");
+                    println!("  Total files: {}", stats.total_files);
+                    println!("  Uploaded: {}", stats.uploaded);
+                    println!("  Skipped (duplicates): {}", stats.skipped);
+                    println!("  Failed: {}", stats.failed);
+                    println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                }
+                Err(e) => {
+                    println!("\n✗ Upload failed: {}", e);
+                }
+            }
         }
         Commands::Status => {
             println!("Cache status:");

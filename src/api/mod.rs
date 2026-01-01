@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::Value;
 
 pub mod albums;
+pub mod images;
 pub mod upload;
 
 pub struct SmugMugClient {

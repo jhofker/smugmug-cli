@@ -1,5 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as AnyhowContext, Result};
 use chrono::Utc;
+use md5::Context as Md5Context;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -16,6 +17,7 @@ pub struct UploadWorkerContext {
     pub album_uri: String,
     pub album_key: String,
     pub hash_store: Arc<Mutex<HashStore>>,
+    pub remote_md5s: Option<Arc<std::collections::HashMap<String, String>>>,
     pub dry_run: bool,
 }
 
@@ -23,16 +25,29 @@ pub async fn upload_worker(
     file_path: &Path,
     context: Arc<UploadWorkerContext>,
 ) -> Result<UploadStatus> {
-    // Calculate file hash
+    // Calculate file hash (SHA256 for local cache)
     let hash = calculate_file_hash(file_path)
-        .context("Failed to calculate file hash")?;
+        .with_context(|| "Failed to calculate file hash")?;
 
-    // Check cache
+    // Check local cache first
     {
         let store = context.hash_store.lock().await;
         if let Some(cached) = store.get(&hash)? {
             return Ok(UploadStatus::Skipped {
-                reason: format!("Already uploaded: {}", cached.smugmug_uri),
+                reason: format!("Already uploaded (local cache): {}", cached.smugmug_uri),
+                hash,
+            });
+        }
+    }
+
+    // Check remote MD5s if enabled
+    if let Some(ref remote_md5s) = context.remote_md5s {
+        let md5_hash = calculate_md5_hash(file_path)
+            .with_context(|| "Failed to calculate MD5 hash")?;
+
+        if let Some(image_key) = remote_md5s.get(&md5_hash.to_lowercase()) {
+            return Ok(UploadStatus::Skipped {
+                reason: format!("Already exists on SmugMug (image key: {})", image_key),
                 hash,
             });
         }
@@ -40,7 +55,7 @@ pub async fn upload_worker(
 
     // Get file size
     let file_size = std::fs::metadata(file_path)
-        .context("Failed to get file metadata")?
+        .with_context(|| "Failed to get file metadata")?
         .len();
 
     // Skip actual upload if dry run
@@ -55,7 +70,7 @@ pub async fn upload_worker(
         file_path,
     )
     .await
-    .context("Failed to upload image")?;
+    .with_context(|| "Failed to upload image")?;
 
     // Update cache
     let uploaded_file = UploadedFile {
@@ -112,4 +127,21 @@ fn calculate_file_hash(file_path: &Path) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn calculate_md5_hash(file_path: &Path) -> Result<String> {
+    let file = File::open(file_path)?;
+    let mut reader = BufReader::new(file);
+    let mut context = Md5Context::new();
+    let mut buffer = [0; 8192];
+
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        context.consume(&buffer[..count]);
+    }
+
+    Ok(format!("{:x}", context.compute()))
 }

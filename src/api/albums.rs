@@ -301,7 +301,27 @@ impl SmugMugClient {
             }
         }
 
-        // Album not found, create it
-        self.create_album(name, None).await
+        // Album not found, try to create it
+        match self.create_album(name, None).await {
+            Ok(album) => Ok(album),
+            Err(e) => {
+                // If we get a conflict error, the album likely exists but wasn't in the cached list
+                // Try listing albums again to get the fresh data
+                let error_msg = e.to_string();
+                if error_msg.contains("409") || error_msg.contains("Conflict") {
+                    let albums = self.list_albums().await?;
+                    for album in albums {
+                        if album.name == name {
+                            return Ok(album);
+                        }
+                    }
+                    // Still not found, return the original error
+                    anyhow::bail!("Album '{}' exists but couldn't be retrieved: {}", name, e);
+                } else {
+                    // Different error, return it
+                    Err(e)
+                }
+            }
+        }
     }
 }

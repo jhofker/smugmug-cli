@@ -20,6 +20,7 @@ pub struct UploadOptions {
     pub client: Arc<SmugMugClient>,
     pub threads: usize,
     pub dry_run: bool,
+    pub check_remote: bool,
     pub cache_path: PathBuf,
 }
 
@@ -71,12 +72,37 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             .progress_chars("#>-"),
     );
 
+    // Fetch remote MD5s if check_remote is enabled
+    let remote_md5s = if options.check_remote {
+        println!("Fetching existing images from SmugMug...");
+        match options.client.list_album_images(&options.album.album_key).await {
+            Ok(images) => {
+                let md5_map: std::collections::HashMap<String, String> = images
+                    .iter()
+                    .filter_map(|img| {
+                        img.archived_md5.as_ref().map(|md5| (md5.to_lowercase(), img.image_key.clone()))
+                    })
+                    .collect();
+                println!("Found {} images with MD5 hashes on SmugMug\n", md5_map.len());
+                Some(Arc::new(md5_map))
+            }
+            Err(e) => {
+                println!("Warning: Failed to fetch remote MD5s: {}", e);
+                println!("Continuing with local cache only\n");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Create worker context
     let context = Arc::new(UploadWorkerContext {
         client: options.client,
         album_uri: format!("/api/v2/album/{}", options.album.album_key),
         album_key: options.album.album_key.clone(),
         hash_store: hash_store.clone(),
+        remote_md5s,
         dry_run: options.dry_run,
     });
 
