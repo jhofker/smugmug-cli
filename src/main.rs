@@ -363,18 +363,35 @@ async fn main() -> Result<()> {
                     // Get or create the album
                     println!("Looking up album...");
                     let album = if let Some(parent_uri) = parent_node_uri.as_deref() {
-                        // Parent specified, create album in specific location
-                        match client.create_album(&album_name, Some(parent_uri)).await {
-                            Ok(album) => {
-                                println!("✓ Created album: {} (Key: {})", album.name, album.album_key);
-                                if let Some(ref web_uri) = album.web_uri {
+                        // Parent specified, check if album exists in that folder first
+                        match client.find_album_in_folder(parent_uri, &album_name).await {
+                            Ok(Some(existing_album)) => {
+                                println!("✓ Found existing album: {} (Key: {})", existing_album.name, existing_album.album_key);
+                                if let Some(ref web_uri) = existing_album.web_uri {
                                     println!("  URL: {}", web_uri);
                                 }
                                 println!();
-                                album
+                                existing_album
+                            }
+                            Ok(None) => {
+                                // Album doesn't exist, create it
+                                match client.create_album(&album_name, Some(parent_uri)).await {
+                                    Ok(album) => {
+                                        println!("✓ Created album: {} (Key: {})", album.name, album.album_key);
+                                        if let Some(ref web_uri) = album.web_uri {
+                                            println!("  URL: {}", web_uri);
+                                        }
+                                        println!();
+                                        album
+                                    }
+                                    Err(e) => {
+                                        println!("✗ Failed to create album: {}", e);
+                                        return Ok(());
+                                    }
+                                }
                             }
                             Err(e) => {
-                                println!("✗ Failed to create album: {}", e);
+                                println!("✗ Failed to search for album: {}", e);
                                 return Ok(());
                             }
                         }
