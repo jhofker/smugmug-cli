@@ -72,6 +72,10 @@ enum Commands {
         #[arg(short, long)]
         album: Option<String>,
 
+        /// Parent folder path (e.g., "2024/Travel" creates album in Travel folder)
+        #[arg(short, long)]
+        parent: Option<String>,
+
         /// Dry run - don't actually upload
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -261,7 +265,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Upload { path, threads, album, dry_run, check_remote, no_cache } => {
+        Commands::Upload { path, threads, album, parent, dry_run, check_remote, no_cache } => {
             let cfg = config::load_config()?;
             let client = std::sync::Arc::new(api::SmugMugClient::new(
                 cfg.auth.api_key,
@@ -339,20 +343,56 @@ async fn main() -> Result<()> {
             // Handle upload based on mode
             match upload_mode {
                 UploadMode::SingleAlbum => {
+                    // Find or create parent folder if specified
+                    let parent_node_uri = if let Some(ref parent_path) = parent {
+                        println!("Finding/creating folder path: {}", parent_path);
+                        match client.find_or_create_folder_path(parent_path).await {
+                            Ok(uri) => {
+                                println!("✓ Using folder: {}\n", parent_path);
+                                Some(uri)
+                            }
+                            Err(e) => {
+                                println!("✗ Failed to find/create folder path: {}", e);
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
                     // Get or create the album
                     println!("Looking up album...");
-                    let album = match client.get_or_create_album(&album_name).await {
-                        Ok(album) => {
-                            println!("✓ Using album: {} (Key: {})", album.name, album.album_key);
-                            if let Some(ref web_uri) = album.web_uri {
-                                println!("  URL: {}", web_uri);
+                    let album = if let Some(parent_uri) = parent_node_uri.as_deref() {
+                        // Parent specified, create album in specific location
+                        match client.create_album(&album_name, Some(parent_uri)).await {
+                            Ok(album) => {
+                                println!("✓ Created album: {} (Key: {})", album.name, album.album_key);
+                                if let Some(ref web_uri) = album.web_uri {
+                                    println!("  URL: {}", web_uri);
+                                }
+                                println!();
+                                album
                             }
-                            println!();
-                            album
+                            Err(e) => {
+                                println!("✗ Failed to create album: {}", e);
+                                return Ok(());
+                            }
                         }
-                        Err(e) => {
-                            println!("✗ Failed to get/create album: {}", e);
-                            return Ok(());
+                    } else {
+                        // No parent specified, use root and check for existing
+                        match client.get_or_create_album(&album_name).await {
+                            Ok(album) => {
+                                println!("✓ Using album: {} (Key: {})", album.name, album.album_key);
+                                if let Some(ref web_uri) = album.web_uri {
+                                    println!("  URL: {}", web_uri);
+                                }
+                                println!();
+                                album
+                            }
+                            Err(e) => {
+                                println!("✗ Failed to get/create album: {}", e);
+                                return Ok(());
+                            }
                         }
                     };
 
