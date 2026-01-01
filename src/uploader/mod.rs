@@ -551,3 +551,326 @@ async fn create_folder(
     let node_response: CreateNodeResponse = serde_json::from_str(&body_text)?;
     Ok(node_response.response.node.uri)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests for upload orchestration, options, statistics, and concurrent operations
+    // Focuses on structure initialization, stats tracking, and thread safety
+
+    #[test]
+    fn test_upload_options_creation() {
+        let client = Arc::new(SmugMugClient::new(
+            "key".to_string(),
+            "secret".to_string(),
+            "token".to_string(),
+            "token_secret".to_string(),
+        ));
+
+        let album = Album {
+            album_key: "ABC123".to_string(),
+            name: "Test Album".to_string(),
+            url_name: "test-album".to_string(),
+            uri: "/api/v2/album/ABC123".to_string(),
+            web_uri: Some("https://example.com/album".to_string()),
+            node_id: "node123".to_string(),
+        };
+
+        let options = UploadOptions {
+            path: PathBuf::from("/test/path"),
+            album: album.clone(),
+            client: client.clone(),
+            threads: 4,
+            dry_run: true,
+            check_remote: false,
+            no_cache: true,
+            cache_path: PathBuf::from("/cache"),
+        };
+
+        assert_eq!(options.path, PathBuf::from("/test/path"));
+        assert_eq!(options.album.album_key, "ABC123");
+        assert_eq!(options.threads, 4);
+        assert!(options.dry_run);
+        assert!(!options.check_remote);
+        assert!(options.no_cache);
+        assert_eq!(options.cache_path, PathBuf::from("/cache"));
+    }
+
+    #[test]
+    fn test_upload_stats_initial() {
+        let stats = UploadStats {
+            total_files: 10,
+            uploaded: 0,
+            skipped: 0,
+            failed: 0,
+            total_bytes: 0,
+            folders_created: 0,
+            albums_created: 0,
+        };
+
+        assert_eq!(stats.total_files, 10);
+        assert_eq!(stats.uploaded, 0);
+        assert_eq!(stats.skipped, 0);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.folders_created, 0);
+        assert_eq!(stats.albums_created, 0);
+    }
+
+    #[test]
+    fn test_upload_stats_progress() {
+        let mut stats = UploadStats {
+            total_files: 10,
+            uploaded: 0,
+            skipped: 0,
+            failed: 0,
+            total_bytes: 0,
+            folders_created: 0,
+            albums_created: 0,
+        };
+
+        // Simulate progress
+        stats.uploaded += 5;
+        stats.skipped += 2;
+        stats.failed += 1;
+        stats.total_bytes += 5000000; // 5MB
+
+        assert_eq!(stats.uploaded, 5);
+        assert_eq!(stats.skipped, 2);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.total_bytes, 5000000);
+        assert_eq!(stats.uploaded + stats.skipped + stats.failed, 8);
+    }
+
+    #[test]
+    fn test_upload_structure_options_creation() {
+        let client = Arc::new(SmugMugClient::new(
+            "key".to_string(),
+            "secret".to_string(),
+            "token".to_string(),
+            "token_secret".to_string(),
+        ));
+
+        let options = UploadStructureOptions {
+            path: PathBuf::from("/test/structure"),
+            client: client.clone(),
+            dry_run: false,
+            check_remote: true,
+            no_cache: false,
+            cache_path: PathBuf::from("/cache/path"),
+        };
+
+        assert_eq!(options.path, PathBuf::from("/test/structure"));
+        assert!(!options.dry_run);
+        assert!(options.check_remote);
+        assert!(!options.no_cache);
+        assert_eq!(options.cache_path, PathBuf::from("/cache/path"));
+    }
+
+    #[tokio::test]
+    async fn test_queue_thread_safety() {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let queue = Arc::new(Mutex::new(UploadQueue::new()));
+
+        // Add files to queue
+        for i in 0..10 {
+            let mut q = queue.lock().await;
+            q.add(PathBuf::from(format!("/test/file{}.jpg", i)));
+        }
+
+        // Spawn multiple workers to consume from queue
+        let mut handles = vec![];
+        for _ in 0..3 {
+            let q = queue.clone();
+            let handle = tokio::spawn(async move {
+                let mut count = 0;
+                loop {
+                    let item = {
+                        let mut queue = q.lock().await;
+                        queue.next()
+                    };
+                    if item.is_none() {
+                        break;
+                    }
+                    count += 1;
+                }
+                count
+            });
+            handles.push(handle);
+        }
+
+        // Collect results
+        let mut total_processed = 0;
+        for handle in handles {
+            total_processed += handle.await.unwrap();
+        }
+
+        assert_eq!(total_processed, 10);
+
+        // Queue should be empty
+        let mut q = queue.lock().await;
+        assert!(q.next().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_upload_stats_concurrent_updates() {
+        let stats = Arc::new(Mutex::new(UploadStats {
+            total_files: 100,
+            uploaded: 0,
+            skipped: 0,
+            failed: 0,
+            total_bytes: 0,
+            folders_created: 0,
+            albums_created: 0,
+        }));
+
+        let mut handles = vec![];
+
+        // Spawn multiple tasks updating stats
+        for _ in 0..10 {
+            let s = stats.clone();
+            let handle = tokio::spawn(async move {
+                for _ in 0..10 {
+                    let mut stats = s.lock().await;
+                    stats.uploaded += 1;
+                    stats.total_bytes += 1024;
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let final_stats = stats.lock().await;
+        assert_eq!(final_stats.uploaded, 100);
+        assert_eq!(final_stats.total_bytes, 102400);
+    }
+
+    #[test]
+    fn test_upload_stats_zero_state() {
+        let stats = UploadStats {
+            total_files: 0,
+            uploaded: 0,
+            skipped: 0,
+            failed: 0,
+            total_bytes: 0,
+            folders_created: 0,
+            albums_created: 0,
+        };
+
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.uploaded + stats.skipped + stats.failed, 0);
+    }
+
+    #[test]
+    fn test_upload_stats_large_numbers() {
+        let stats = UploadStats {
+            total_files: 10000,
+            uploaded: 8500,
+            skipped: 1200,
+            failed: 300,
+            total_bytes: 50_000_000_000, // 50GB
+            folders_created: 100,
+            albums_created: 50,
+        };
+
+        assert_eq!(stats.total_files, 10000);
+        assert_eq!(stats.uploaded, 8500);
+        assert_eq!(stats.skipped, 1200);
+        assert_eq!(stats.failed, 300);
+        assert_eq!(stats.total_bytes, 50_000_000_000);
+        assert_eq!(stats.folders_created, 100);
+        assert_eq!(stats.albums_created, 50);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_workers_processing_queue() {
+        let queue = Arc::new(Mutex::new(UploadQueue::new()));
+
+        // Add 100 files
+        for i in 0..100 {
+            let mut q = queue.lock().await;
+            q.add(PathBuf::from(format!("/test/image{}.jpg", i)));
+        }
+
+        let processed = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = vec![];
+
+        // Create 5 workers
+        for worker_id in 0..5 {
+            let q = queue.clone();
+            let p = processed.clone();
+
+            let handle = tokio::spawn(async move {
+                loop {
+                    let file = {
+                        let mut queue = q.lock().await;
+                        queue.next()
+                    };
+
+                    match file {
+                        Some(path) => {
+                            let mut proc = p.lock().await;
+                            proc.push((worker_id, path));
+                        }
+                        None => break,
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all workers
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let proc = processed.lock().await;
+        assert_eq!(proc.len(), 100);
+
+        // Verify all files were processed
+        let mut file_indices: Vec<usize> = proc
+            .iter()
+            .map(|(_, path)| {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                let num_str = name.strip_prefix("image").unwrap().strip_suffix(".jpg").unwrap();
+                num_str.parse().unwrap()
+            })
+            .collect();
+
+        file_indices.sort();
+        assert_eq!(file_indices, (0..100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_upload_stats_calculation() {
+        let stats = UploadStats {
+            total_files: 100,
+            uploaded: 70,
+            skipped: 20,
+            failed: 10,
+            total_bytes: 1_073_741_824, // 1GB
+            folders_created: 5,
+            albums_created: 3,
+        };
+
+        // Verify all files accounted for
+        assert_eq!(
+            stats.uploaded + stats.skipped + stats.failed,
+            stats.total_files
+        );
+
+        // Check individual values
+        assert_eq!(stats.uploaded, 70);
+        assert_eq!(stats.skipped, 20);
+        assert_eq!(stats.failed, 10);
+        assert_eq!(stats.total_bytes, 1_073_741_824);
+    }
+}

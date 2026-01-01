@@ -130,3 +130,327 @@ fn calculate_md5_hash(file_path: &Path) -> Result<String> {
 
     Ok(format!("{:x}", context.compute()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // Tests for worker functions: hash calculation, deduplication, and upload status
+    // All tests use temporary files and avoid actual API calls
+
+    // Helper to create a temporary test file with content
+    fn create_test_file(content: &[u8]) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn test_calculate_file_hash() {
+        let content = b"test content for hashing";
+        let file = create_test_file(content);
+
+        let hash = calculate_file_hash(file.path()).unwrap();
+
+        // Verify hash is valid SHA256 format (64 hex characters)
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Verify hash is consistent
+        let hash2 = calculate_file_hash(file.path()).unwrap();
+        assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_calculate_file_hash_empty_file() {
+        let file = create_test_file(b"");
+        let hash = calculate_file_hash(file.path()).unwrap();
+
+        // SHA256 of empty file
+        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    }
+
+    #[test]
+    fn test_calculate_file_hash_large_file() {
+        // Create a file larger than buffer size (8192 bytes)
+        let content: Vec<u8> = (0..20000).map(|i| (i % 256) as u8).collect();
+        let file = create_test_file(&content);
+
+        let hash = calculate_file_hash(file.path()).unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_calculate_md5_hash() {
+        let content = b"test content for md5";
+        let file = create_test_file(content);
+
+        let hash = calculate_md5_hash(file.path()).unwrap();
+
+        // Verify hash is valid MD5 format (32 hex characters)
+        assert_eq!(hash.len(), 32);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Verify hash is consistent
+        let hash2 = calculate_md5_hash(file.path()).unwrap();
+        assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_calculate_md5_hash_empty_file() {
+        let file = create_test_file(b"");
+        let hash = calculate_md5_hash(file.path()).unwrap();
+
+        // MD5 of empty file
+        assert_eq!(hash, "d41d8cd98f00b204e9800998ecf8427e");
+    }
+
+    #[test]
+    fn test_different_content_different_hashes() {
+        let file1 = create_test_file(b"content1");
+        let file2 = create_test_file(b"content2");
+
+        let hash1 = calculate_file_hash(file1.path()).unwrap();
+        let hash2 = calculate_file_hash(file2.path()).unwrap();
+
+        assert_ne!(hash1, hash2);
+
+        let md5_1 = calculate_md5_hash(file1.path()).unwrap();
+        let md5_2 = calculate_md5_hash(file2.path()).unwrap();
+
+        assert_ne!(md5_1, md5_2);
+    }
+
+    #[tokio::test]
+    async fn test_upload_worker_dry_run() {
+        let file = create_test_file(b"test image content");
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let hash_store = Arc::new(Mutex::new(
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+        ));
+
+        let client = Arc::new(SmugMugClient::new(
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            "test_token".to_string(),
+            "test_token_secret".to_string(),
+        ));
+
+        let context = Arc::new(UploadWorkerContext {
+            client,
+            album_uri: "/api/v2/album/test".to_string(),
+            album_key: "test_album".to_string(),
+            hash_store,
+            remote_md5s: None,
+            dry_run: true,
+            no_cache: false,
+        });
+
+        let result = upload_worker(file.path(), context).await.unwrap();
+
+        match result {
+            UploadStatus::DryRun { file_size } => {
+                assert!(file_size > 0);
+            }
+            _ => panic!("Expected DryRun status"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_worker_skipped_local_cache() {
+        let file = create_test_file(b"cached content");
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let hash_store = Arc::new(Mutex::new(
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+        ));
+
+        // Pre-populate cache
+        let hash = calculate_file_hash(file.path()).unwrap();
+        let uploaded_file = UploadedFile {
+            smugmug_uri: "/api/v2/image/test".to_string(),
+            album_key: "test_album".to_string(),
+            image_key: "test_key".to_string(),
+            uploaded_at: Utc::now(),
+            file_size: 100,
+            original_path: file.path().to_string_lossy().to_string(),
+        };
+        hash_store.lock().await.insert(&hash, uploaded_file).unwrap();
+
+        let client = Arc::new(SmugMugClient::new(
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            "test_token".to_string(),
+            "test_token_secret".to_string(),
+        ));
+
+        let context = Arc::new(UploadWorkerContext {
+            client,
+            album_uri: "/api/v2/album/test".to_string(),
+            album_key: "test_album".to_string(),
+            hash_store,
+            remote_md5s: None,
+            dry_run: false,
+            no_cache: false,
+        });
+
+        let result = upload_worker(file.path(), context).await.unwrap();
+
+        match result {
+            UploadStatus::Skipped => {
+                // Success - file was skipped due to local cache
+            }
+            _ => panic!("Expected Skipped status due to local cache"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_worker_skipped_remote_md5() {
+        let file = create_test_file(b"remote content");
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let hash_store = Arc::new(Mutex::new(
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+        ));
+
+        // Calculate MD5 and add to remote map
+        let md5 = calculate_md5_hash(file.path()).unwrap();
+        let mut remote_md5s = HashMap::new();
+        remote_md5s.insert(md5.to_lowercase(), "remote_image_key".to_string());
+
+        let client = Arc::new(SmugMugClient::new(
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            "test_token".to_string(),
+            "test_token_secret".to_string(),
+        ));
+
+        let context = Arc::new(UploadWorkerContext {
+            client,
+            album_uri: "/api/v2/album/test".to_string(),
+            album_key: "test_album".to_string(),
+            hash_store,
+            remote_md5s: Some(Arc::new(remote_md5s)),
+            dry_run: false,
+            no_cache: false,
+        });
+
+        let result = upload_worker(file.path(), context).await.unwrap();
+
+        match result {
+            UploadStatus::Skipped => {
+                // Success - file was skipped due to remote MD5 match
+            }
+            _ => panic!("Expected Skipped status due to remote MD5"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_worker_no_cache_flag() {
+        let file = create_test_file(b"no cache test");
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let hash_store = Arc::new(Mutex::new(
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+        ));
+
+        // Pre-populate cache
+        let hash = calculate_file_hash(file.path()).unwrap();
+        let uploaded_file = UploadedFile {
+            smugmug_uri: "/api/v2/image/test".to_string(),
+            album_key: "test_album".to_string(),
+            image_key: "test_key".to_string(),
+            uploaded_at: Utc::now(),
+            file_size: 100,
+            original_path: file.path().to_string_lossy().to_string(),
+        };
+        hash_store.lock().await.insert(&hash, uploaded_file).unwrap();
+
+        let client = Arc::new(SmugMugClient::new(
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            "test_token".to_string(),
+            "test_token_secret".to_string(),
+        ));
+
+        let context = Arc::new(UploadWorkerContext {
+            client,
+            album_uri: "/api/v2/album/test".to_string(),
+            album_key: "test_album".to_string(),
+            hash_store,
+            remote_md5s: None,
+            dry_run: true, // Use dry run to avoid actual upload
+            no_cache: true, // This should bypass local cache
+        });
+
+        let result = upload_worker(file.path(), context).await.unwrap();
+
+        // With no_cache=true, should not be skipped even though in cache
+        match result {
+            UploadStatus::DryRun { .. } => {
+                // Success - cache was bypassed
+            }
+            _ => panic!("Expected DryRun status (cache should be bypassed)"),
+        }
+    }
+
+    #[test]
+    fn test_upload_status_variants() {
+        let uploaded = UploadStatus::Uploaded { file_size: 1024 };
+        let skipped = UploadStatus::Skipped;
+        let dry_run = UploadStatus::DryRun { file_size: 2048 };
+
+        match uploaded {
+            UploadStatus::Uploaded { file_size } => assert_eq!(file_size, 1024),
+            _ => panic!("Wrong variant"),
+        }
+
+        match skipped {
+            UploadStatus::Skipped => {},
+            _ => panic!("Wrong variant"),
+        }
+
+        match dry_run {
+            UploadStatus::DryRun { file_size } => assert_eq!(file_size, 2048),
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_worker_context_creation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let hash_store = Arc::new(Mutex::new(
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+        ));
+
+        let client = Arc::new(SmugMugClient::new(
+            "key".to_string(),
+            "secret".to_string(),
+            "token".to_string(),
+            "token_secret".to_string(),
+        ));
+
+        let remote_md5s = HashMap::new();
+
+        let context = UploadWorkerContext {
+            client: client.clone(),
+            album_uri: "/api/v2/album/ABC123".to_string(),
+            album_key: "ABC123".to_string(),
+            hash_store: hash_store.clone(),
+            remote_md5s: Some(Arc::new(remote_md5s)),
+            dry_run: false,
+            no_cache: true,
+        };
+
+        assert_eq!(context.album_uri, "/api/v2/album/ABC123");
+        assert_eq!(context.album_key, "ABC123");
+        assert!(!context.dry_run);
+        assert!(context.no_cache);
+        assert!(context.remote_md5s.is_some());
+    }
+}
