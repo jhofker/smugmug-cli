@@ -41,10 +41,26 @@ pub fn is_supported_file(path: &Path) -> bool {
     matches!(
         extension.as_str(),
         // Image formats
-        "jpg" | "jpeg" | "png" | "heif" | "heic" | "raw" | "dng" |
-        "cr2" | "nef" | "arw" |
+        "jpg" | "jpeg" | "png" | "heif" | "heic" | "gif" | "bmp" | "tiff" | "tif" |
+        // RAW formats
+        "raw" | "dng" | "cr2" | "cr3" | "nef" | "arw" | "orf" | "raf" |
+        "rw2" | "pef" | "srw" | "erf" | "mrw" | "3fr" | "fff" | "iiq" |
         // Video formats
-        "mp4" | "mov" | "avi"
+        "mp4" | "mov" | "avi" | "m4v" | "mkv"
+    )
+}
+
+/// Check if a file is a RAW format (requires SmugMug Source subscription)
+pub fn is_raw_file(path: &Path) -> bool {
+    let extension = match path.extension() {
+        Some(ext) => ext.to_string_lossy().to_lowercase(),
+        None => return false,
+    };
+
+    matches!(
+        extension.as_str(),
+        "raw" | "dng" | "cr2" | "cr3" | "nef" | "arw" | "orf" | "raf" |
+        "rw2" | "pef" | "srw" | "erf" | "mrw" | "3fr" | "fff" | "iiq"
     )
 }
 

@@ -99,6 +99,7 @@ impl HashStore {
     }
 
     /// Get the total number of entries in the cache
+    #[allow(dead_code)]
     pub fn count(&self) -> Result<usize> {
         let mut count = 0;
         for item in self.db.iter() {
@@ -109,6 +110,7 @@ impl HashStore {
     }
 
     /// Get the total size of cached data in bytes (sum of file_size fields)
+    #[allow(dead_code)]
     pub fn size(&self) -> Result<u64> {
         let mut total_size = 0u64;
         for item in self.db.iter() {

@@ -1,7 +1,6 @@
 use anyhow::Result;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use super::SmugMugClient;
 
@@ -19,6 +18,35 @@ pub struct Album {
     pub uri: String,
     #[serde(rename = "WebUri", skip_serializing_if = "Option::is_none")]
     pub web_uri: Option<String>,
+    #[serde(rename = "Uris", skip_serializing_if = "Option::is_none")]
+    pub uris: Option<AlbumUris>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AlbumUris {
+    #[serde(rename = "AlbumDownload", skip_serializing_if = "Option::is_none")]
+    pub album_download: Option<DownloadUriInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DownloadUriInfo {
+    #[serde(rename = "Uri")]
+    pub uri: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct AlbumDownloadInfo {
+    #[serde(rename = "Status", skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+
+    #[serde(rename = "DownloadUrl", skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+
+    #[serde(rename = "ByteCount", skip_serializing_if = "Option::is_none")]
+    pub _byte_count: Option<u64>,
+
+    #[serde(rename = "Uri", skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,6 +533,7 @@ impl SmugMugClient {
                         node_id: node.node_id.clone(),
                         uri: album_uri.clone(),
                         web_uri: Some(node.web_uri.clone()),
+                        uris: None,
                     };
 
                     return Ok(Some(album));
@@ -642,6 +671,7 @@ impl SmugMugClient {
         Ok(node_response.response.node.uri)
     }
 
+    #[allow(dead_code)]
     pub async fn get_album(&self, album_key: &str) -> Result<Album> {
         let album_url = format!("https://api.smugmug.com/api/v2/album/{}", album_key);
         let oauth_header = self.build_oauth_header("GET", &album_url);
@@ -669,17 +699,7 @@ impl SmugMugClient {
 
     pub async fn delete_album(&self, album_key: &str) -> Result<()> {
         let album_url = format!("https://api.smugmug.com/api/v2/album/{}", album_key);
-        let oauth_header = self.build_oauth_header("DELETE", &album_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self.client
-            .delete(&album_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.delete_with_auth(&album_url).await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -906,6 +926,141 @@ impl SmugMugClient {
 
         Ok(())
     }
+
+    /// Request album download ZIP generation
+    pub async fn request_album_download(&self, album_key: &str) -> Result<AlbumDownloadInfo> {
+        // First, get the album to find its download URI
+        let album_url = format!("https://api.smugmug.com/api/v2/album/{}?_expand=Uris", album_key);
+        let oauth_header = self.build_oauth_header("GET", &album_url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let response = self.client
+            .get(&album_url)
+            .headers(headers)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body_text = response.text().await?;
+
+        if !status.is_success() {
+            anyhow::bail!("Failed to get album: {} - {}", status, body_text);
+        }
+
+        let album_response: AlbumResponse = serde_json::from_str(&body_text)?;
+        let album = album_response.response.album;
+
+        // Check if album has download URI
+        let download_uri = album.uris
+            .and_then(|uris| uris.album_download)
+            .map(|download| download.uri)
+            .ok_or_else(|| anyhow::anyhow!("Album does not have a download URI"))?;
+
+        // POST to the download URI to request generation
+        let body = serde_json::json!({});
+        let response = self.post_with_auth(&download_uri, body).await?;
+
+        let status = response.status();
+        let body_text = response.text().await?;
+
+        if !status.is_success() {
+            anyhow::bail!("Failed to request album download: {} - {}", status, body_text);
+        }
+
+        // Parse the response
+        #[derive(Debug, Deserialize)]
+        struct DownloadResponse {
+            #[serde(rename = "Response")]
+            response: DownloadResponseData,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct DownloadResponseData {
+            #[serde(rename = "AlbumDownload")]
+            album_download: AlbumDownloadInfo,
+        }
+
+        let download_response: DownloadResponse = serde_json::from_str(&body_text)?;
+        Ok(download_response.response.album_download)
+    }
+
+    /// Check the status of an album download
+    pub async fn check_album_download_status(&self, download_uri: &str) -> Result<AlbumDownloadInfo> {
+        let oauth_header = self.build_oauth_header("GET", download_uri);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let response = self.client
+            .get(download_uri)
+            .headers(headers)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body_text = response.text().await?;
+
+        if !status.is_success() {
+            anyhow::bail!("Failed to check download status: {} - {}", status, body_text);
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct DownloadResponse {
+            #[serde(rename = "Response")]
+            response: DownloadResponseData,
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct DownloadResponseData {
+            #[serde(rename = "AlbumDownload")]
+            album_download: AlbumDownloadInfo,
+        }
+
+        let download_response: DownloadResponse = serde_json::from_str(&body_text)?;
+        Ok(download_response.response.album_download)
+    }
+
+    /// Get album download link with polling (max 10 attempts, 3s intervals)
+    pub async fn get_album_download_link(&self, album_key: &str) -> Result<String> {
+        use tokio::time::{sleep, Duration};
+
+        // Request download
+        let info = self.request_album_download(album_key).await?;
+        let download_uri = info.uri
+            .ok_or_else(|| anyhow::anyhow!("No URI returned from download request"))?;
+
+        // Poll for completion
+        for attempt in 1..=10 {
+            let status = self.check_album_download_status(&download_uri).await?;
+
+            match status.status.as_deref() {
+                Some("Ready") => {
+                    return status.download_url
+                        .ok_or_else(|| anyhow::anyhow!("Download ready but no URL provided"));
+                }
+                Some("Failed") => {
+                    anyhow::bail!("Download generation failed");
+                }
+                Some("Pending") | Some("Processing") | None => {
+                    if attempt < 10 {
+                        sleep(Duration::from_secs(3)).await;
+                    }
+                }
+                Some(other) => {
+                    println!("  Status: {} (attempt {}/10)", other, attempt);
+                    if attempt < 10 {
+                        sleep(Duration::from_secs(3)).await;
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!("Timeout waiting for download. Check status at: {}", download_uri)
+    }
 }
 
 #[cfg(test)]
@@ -930,6 +1085,7 @@ mod tests {
             node_id: "NODE123".to_string(),
             uri: "/api/v2/album/ABC123".to_string(),
             web_uri: Some("https://user.smugmug.com/test-album".to_string()),
+            uris: None,
         };
 
         let json = serde_json::to_string(&album).unwrap();
@@ -1201,6 +1357,7 @@ mod tests {
             node_id: "NODE123".to_string(),
             uri: "/api/v2/album/ABC123".to_string(),
             web_uri: Some("https://user.smugmug.com/test-album".to_string()),
+            uris: None,
         };
 
         let cloned = album.clone();

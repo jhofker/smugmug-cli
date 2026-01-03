@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use dialoguer::Input;
+use colored::*;
+use dialoguer::{Input, Confirm};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -24,6 +25,8 @@ pub struct UploadConfig {
     pub threads: usize,
     pub retry_attempts: u32,
     pub timeout_seconds: u64,
+    #[serde(default)]
+    pub has_smugmug_source: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,6 +52,7 @@ impl Default for Config {
                 threads: 4,
                 retry_attempts: 3,
                 timeout_seconds: 300,
+                has_smugmug_source: false,
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
@@ -116,17 +120,91 @@ pub async fn init_config() -> Result<()> {
         input.interact_text()?
     };
 
+    // Test authentication and detect SmugMug Source
+    println!("\n{}", "Testing authentication and detecting features...".cyan());
+
+    let test_client = crate::api::SmugMugClient::new(
+        api_key.clone(),
+        api_secret.clone(),
+        access_token.clone(),
+        access_token_secret.clone(),
+    );
+
+    let mut has_smugmug_source = false;
+
+    match test_client.get_auth_user().await {
+        Ok(user_info) => {
+            println!("{}", "✓ Authentication successful!".green().bold());
+
+            // Try to fetch features to detect SmugMug Source
+            if let Some(user_uri) = user_info["Response"]["User"]["Uri"].as_str() {
+                match test_client.get_user_features(user_uri).await {
+                    Ok(features) => {
+                        // Check PremiumStorage field to detect SmugMug Source
+                        if let Some(premium_storage) = features["Response"]["Features"]["PremiumStorage"].as_bool() {
+                            has_smugmug_source = premium_storage;
+
+                            if premium_storage {
+                                println!("{} {}", "✓".green().bold(), "Detected SmugMug Source subscription (PremiumStorage enabled)".green());
+                                println!("  {} {}", "→".bright_cyan(), "RAW file uploads enabled".cyan());
+                                println!("  {} {}", "→".bright_cyan(), "Original file downloads enabled".cyan());
+                                println!("  {} {}\n", "→".bright_cyan(), "Cloud storage backup enabled".cyan());
+                            } else {
+                                println!("{} {}", "ℹ".cyan().bold(), "SmugMug Source not detected".cyan());
+                                println!("  {}\n", "RAW file uploads will not be available".bright_black());
+                            }
+
+                            // Allow user to override detection
+                            let override_detection = Confirm::new()
+                                .with_prompt("Override auto-detection?")
+                                .default(false)
+                                .interact()?;
+
+                            if override_detection {
+                                has_smugmug_source = Confirm::new()
+                                    .with_prompt("Do you have a SmugMug Source subscription?")
+                                    .default(has_smugmug_source)
+                                    .interact()?;
+                            }
+                        } else {
+                            // Couldn't detect, ask user
+                            println!("{} {}", "⚠".yellow().bold(), "Could not auto-detect SmugMug Source".yellow());
+                            has_smugmug_source = Confirm::new()
+                                .with_prompt("Do you have a SmugMug Source subscription?")
+                                .default(false)
+                                .interact()?;
+                        }
+                    }
+                    Err(_) => {
+                        // Couldn't fetch features, ask user
+                        println!("{} {}", "⚠".yellow().bold(), "Could not fetch account features".yellow());
+                        has_smugmug_source = Confirm::new()
+                            .with_prompt("Do you have a SmugMug Source subscription?")
+                            .default(false)
+                            .interact()?;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("{} {}", "✗".red().bold(), format!("Authentication test failed: {}", e).red());
+            println!("{}", "Please verify your credentials are correct.".yellow());
+            return Err(e);
+        }
+    }
+
     let mut config = Config::default();
     config.auth.api_key = api_key;
     config.auth.api_secret = api_secret;
     config.auth.access_token = access_token;
     config.auth.access_token_secret = access_token_secret;
+    config.upload.has_smugmug_source = has_smugmug_source;
 
     save_config(&config)?;
 
     let config_path = get_config_path()?;
-    println!("\n✓ Configuration saved to: {}", config_path.display());
-    println!("\nYou can now upload photos using: smugmug-cli upload <path>");
+    println!("\n{} {}", "✓".green().bold(), format!("Configuration saved to: {}", config_path.display()).green());
+    println!("\n{} {}", "You can now upload photos using:".cyan(), "smugmug-cli upload <path>".bright_white().bold());
 
     Ok(())
 }
@@ -182,6 +260,7 @@ mod tests {
                 threads: 8,
                 retry_attempts: 5,
                 timeout_seconds: 600,
+                has_smugmug_source: false,
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
@@ -527,6 +606,7 @@ cache_path = "/absolute/path/cache.db"
             threads: 4,
             retry_attempts: 3,
             timeout_seconds: 300,
+            has_smugmug_source: false,
         };
 
         let debug_string = format!("{:?}", upload);
@@ -559,6 +639,7 @@ cache_path = "/absolute/path/cache.db"
                 threads: 8,
                 retry_attempts: 5,
                 timeout_seconds: 600,
+                has_smugmug_source: false,
             },
             deduplication: DeduplicationConfig {
                 enabled: true,

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use colored::*;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,6 +15,8 @@ use crate::cache::hash_store::HashStore;
 use crate::scanner::scan_directory;
 use queue::UploadQueue;
 use worker::{upload_worker, UploadStatus, UploadWorkerContext};
+// Re-exported for use in tests and examples
+#[allow(unused_imports)]
 pub use worker::calculate_file_hash;
 
 pub struct UploadOptions {
@@ -25,6 +28,8 @@ pub struct UploadOptions {
     pub check_remote: bool,
     pub no_cache: bool,
     pub cache_path: PathBuf,
+    pub retry_attempts: u32,
+    pub has_smugmug_source: bool,
 }
 
 pub struct UploadStats {
@@ -59,6 +64,38 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             folders_created: 0,
             albums_created: 0,
         });
+    }
+
+    // Check for RAW files and warn if SmugMug Source is not enabled
+    let raw_files: Vec<_> = scanned_files
+        .iter()
+        .filter(|f| crate::scanner::is_raw_file(&f.path))
+        .collect();
+
+    if !raw_files.is_empty() && !options.has_smugmug_source {
+        println!("\n{} {}", "⚠".yellow().bold(), format!("Warning: {} RAW files detected", raw_files.len()).yellow().bold());
+        println!("   {}", "RAW file uploads require a SmugMug Source subscription.".yellow());
+        println!("   {}", "These uploads will likely fail without SmugMug Source.".yellow());
+        println!("   {}\n", "(Update config with 'smugmug-cli init' if you have Source)".bright_black());
+
+        use dialoguer::Confirm;
+        let proceed = Confirm::new()
+            .with_prompt("Continue anyway?")
+            .default(false)
+            .interact()?;
+
+        if !proceed {
+            println!("{}", "Upload cancelled.".red());
+            return Ok(UploadStats {
+                total_files: 0,
+                uploaded: 0,
+                skipped: 0,
+                failed: 0,
+                total_bytes: 0,
+                folders_created: 0,
+                albums_created: 0,
+            });
+        }
     }
 
     // Create upload queue
@@ -112,6 +149,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         remote_md5s,
         dry_run: options.dry_run,
         no_cache: options.no_cache,
+        retry_attempts: options.retry_attempts,
     });
 
     // Track statistics
@@ -209,6 +247,8 @@ pub struct UploadStructureOptions {
     pub check_remote: bool,
     pub no_cache: bool,
     pub cache_path: PathBuf,
+    pub retry_attempts: u32,
+    pub has_smugmug_source: bool,
 }
 
 pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<UploadStats> {
@@ -223,10 +263,12 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
     // Walk the directory structure and build a map of folders to files
     println!("Scanning directory structure...");
     let mut folder_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    let mut all_files: Vec<PathBuf> = Vec::new();
 
     fn scan_directory_recursive(
         dir: &std::path::Path,
         folder_map: &mut HashMap<PathBuf, Vec<PathBuf>>,
+        all_files: &mut Vec<PathBuf>,
     ) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -234,22 +276,52 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
 
             if path.is_dir() {
                 // Recursively scan subdirectories
-                scan_directory_recursive(&path, folder_map)?;
+                scan_directory_recursive(&path, folder_map, all_files)?;
             } else if path.is_file() {
-                // Check if this is an image file
-                if let Some(ext) = path.extension() {
-                    let ext_lower = ext.to_string_lossy().to_lowercase();
-                    if matches!(ext_lower.as_str(), "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tiff" | "webp" | "heic") {
-                        let parent = path.parent().unwrap().to_path_buf();
-                        folder_map.entry(parent).or_insert_with(Vec::new).push(path);
-                    }
+                // Check if this is a supported file using the scanner module
+                if crate::scanner::is_supported_file(&path) {
+                    let parent = path.parent().unwrap().to_path_buf();
+                    folder_map.entry(parent).or_insert_with(Vec::new).push(path.clone());
+                    all_files.push(path);
                 }
             }
         }
         Ok(())
     }
 
-    scan_directory_recursive(&options.path, &mut folder_map)?;
+    scan_directory_recursive(&options.path, &mut folder_map, &mut all_files)?;
+
+    // Check for RAW files and warn if SmugMug Source is not enabled
+    let raw_files: Vec<_> = all_files
+        .iter()
+        .filter(|f| crate::scanner::is_raw_file(f))
+        .collect();
+
+    if !raw_files.is_empty() && !options.has_smugmug_source {
+        println!("\n{} {}", "⚠".yellow().bold(), format!("Warning: {} RAW files detected", raw_files.len()).yellow().bold());
+        println!("   {}", "RAW file uploads require a SmugMug Source subscription.".yellow());
+        println!("   {}", "These uploads will likely fail without SmugMug Source.".yellow());
+        println!("   {}\n", "(Update config with 'smugmug-cli init' if you have Source)".bright_black());
+
+        use dialoguer::Confirm;
+        let proceed = Confirm::new()
+            .with_prompt("Continue anyway?")
+            .default(false)
+            .interact()?;
+
+        if !proceed {
+            println!("{}", "Upload cancelled.".red());
+            return Ok(UploadStats {
+                total_files: 0,
+                uploaded: 0,
+                skipped: 0,
+                failed: 0,
+                total_bytes: 0,
+                folders_created: 0,
+                albums_created: 0,
+            });
+        }
+    }
 
     if folder_map.is_empty() {
         println!("No image files found to upload");
@@ -380,6 +452,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             remote_md5s,
             dry_run: options.dry_run,
             no_cache: options.no_cache,
+            retry_attempts: options.retry_attempts,
         });
 
         // Upload files in this folder
@@ -576,6 +649,7 @@ mod tests {
             uri: "/api/v2/album/ABC123".to_string(),
             web_uri: Some("https://example.com/album".to_string()),
             node_id: "node123".to_string(),
+            uris: None,
         };
 
         let options = UploadOptions {
@@ -587,6 +661,8 @@ mod tests {
             check_remote: false,
             no_cache: true,
             cache_path: PathBuf::from("/cache"),
+            retry_attempts: 3,
+            has_smugmug_source: false,
         };
 
         assert_eq!(options.path, PathBuf::from("/test/path"));
@@ -660,6 +736,8 @@ mod tests {
             check_remote: true,
             no_cache: false,
             cache_path: PathBuf::from("/cache/path"),
+            retry_attempts: 3,
+            has_smugmug_source: false,
         };
 
         assert_eq!(options.path, PathBuf::from("/test/structure"));

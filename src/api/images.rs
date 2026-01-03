@@ -154,17 +154,7 @@ impl SmugMugClient {
             "https://api.smugmug.com/api/v2/image/{}",
             image_key
         );
-        let oauth_header = self.build_oauth_header("DELETE", &delete_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self.client
-            .delete(&delete_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.delete_with_auth(&delete_url).await?;
 
         let status = response.status();
 

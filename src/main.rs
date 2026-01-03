@@ -1,10 +1,43 @@
 use clap::{Parser, Subcommand};
 use anyhow::Result;
+use colored::*;
 
 #[derive(Debug, Clone)]
 enum UploadMode {
     SingleAlbum,
     MaintainStructure,
+}
+
+fn print_logo() {
+    println!("{}", r#"
+ ____                        __  __              ____ _     ___
+/ ___| _ __ ___  _   _  ___ |  \/  |_   _  __ _ / ___| |   |_ _|
+\___ \| '_ ` _ \| | | |/ _ `| |\/| | | | |/ _` | |   | |    | |
+ ___) | | | | | | |_| | (_| | |  | | |_| | (_| | |___| |___ | |
+|____/|_| |_| |_|\__,_|\__, |_|  |_|\__,_|\__, |\____|_____|___|
+                       |___/              |___/
+    "#.bright_cyan().bold());
+}
+
+// Helper functions for consistent colored output
+fn success(msg: &str) -> String {
+    format!("{} {}", "✓".green().bold(), msg.green())
+}
+
+fn error(msg: &str) -> String {
+    format!("{} {}", "✗".red().bold(), msg.red())
+}
+
+fn warning(msg: &str) -> String {
+    format!("{} {}", "⚠".yellow().bold(), msg.yellow())
+}
+
+fn info(msg: &str) -> String {
+    msg.cyan().to_string()
+}
+
+fn highlight(msg: &str) -> String {
+    msg.bright_white().bold().to_string()
 }
 
 fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
@@ -96,6 +129,12 @@ enum Commands {
     Images {
         #[command(subcommand)]
         command: ImageCommands,
+    },
+
+    /// Comment management
+    Comments {
+        #[command(subcommand)]
+        command: CommentCommands,
     },
 
     /// Upload photos to SmugMug
@@ -201,6 +240,16 @@ enum AlbumCommands {
         #[arg(long)]
         sort_direction: Option<String>,
     },
+
+    /// Get album download link (ZIP file)
+    GetDownloadLink {
+        /// Album name or key
+        album: String,
+
+        /// Wait for download generation (polls until ready)
+        #[arg(short, long)]
+        wait: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -285,8 +334,46 @@ enum ImageCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum CommentCommands {
+    /// List comments on an image
+    List {
+        /// Album name or key
+        album: String,
+
+        /// Image key
+        image_key: String,
+    },
+
+    /// Create a new comment on an image
+    Create {
+        /// Album name or key
+        album: String,
+
+        /// Image key
+        image_key: String,
+
+        /// Comment text
+        #[arg(short, long)]
+        text: String,
+
+        /// Commenter name
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Commenter email
+        #[arg(short, long)]
+        email: Option<String>,
+
+        /// Rating (0-5)
+        #[arg(short, long)]
+        rating: Option<u8>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    print_logo();
     let cli = Cli::parse();
 
     match cli.command {
@@ -307,13 +394,27 @@ async fn main() -> Result<()> {
 
             match client.get_auth_user().await {
                 Ok(user_info) => {
-                    println!("\n✓ Authentication successful!");
-                    println!("\nUser info:");
+                    println!("\n{}", success("Authentication successful!"));
+                    println!("\n{}", info("User info:"));
                     println!("{}", serde_json::to_string_pretty(&user_info)?);
+
+                    // Try to fetch features
+                    if let Some(user_uri) = user_info["Response"]["User"]["Uri"].as_str() {
+                        println!("\n{}", info("Fetching user features..."));
+                        match client.get_user_features(user_uri).await {
+                            Ok(features) => {
+                                println!("\n{}", info("User features:"));
+                                println!("{}", serde_json::to_string_pretty(&features)?);
+                            }
+                            Err(e) => {
+                                println!("\n{}", error(&format!("Failed to fetch features: {}", e)));
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
-                    println!("\n✗ Authentication failed: {}", e);
-                    println!("\nPlease check your credentials and run 'smugmug-cli init' again.");
+                    println!("\n{}", error(&format!("Authentication failed: {}", e)));
+                    println!("\n{}", warning("Please check your credentials and run 'smugmug-cli init' again."));
                 }
             }
         }
@@ -574,6 +675,63 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             println!("\n✗ Failed to update album settings: {}", e);
+                        }
+                    }
+                }
+                AlbumCommands::GetDownloadLink { album, wait } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let album_key = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    if wait {
+                        println!("Requesting album download...");
+                        println!("(This may take a few minutes for large albums)\n");
+
+                        match client.get_album_download_link(&album_key).await {
+                            Ok(url) => {
+                                println!("\n✓ Download Ready!");
+                                println!("  URL: {}", url);
+                                println!("\nDownload with:");
+                                println!("  wget \"{}\"", url);
+                                println!("  curl -O \"{}\"", url);
+                            }
+                            Err(e) => {
+                                println!("\n✗ Failed to get download link: {}", e);
+                            }
+                        }
+                    } else {
+                        println!("Requesting album download...\n");
+
+                        match client.request_album_download(&album_key).await {
+                            Ok(info) => {
+                                println!("✓ Download requested successfully!");
+                                if let Some(status) = &info.status {
+                                    println!("  Status: {}", status);
+                                }
+                                if let Some(uri) = &info.uri {
+                                    println!("  Status URI: {}", uri);
+                                }
+                                println!("\nTo wait for completion, use:");
+                                println!("  smugmug-cli albums get-download-link \"{}\" --wait", album);
+                            }
+                            Err(e) => {
+                                println!("\n✗ Failed to request download: {}", e);
+                            }
                         }
                     }
                 }
@@ -981,6 +1139,171 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Comments { command } => {
+            let cfg = config::load_config()?;
+            let client = std::sync::Arc::new(api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            ));
+
+            match command {
+                CommentCommands::List { album, image_key } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let album_key_resolved = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Verify the image exists in the album
+                    println!("Verifying image exists...");
+                    let image_exists = match client.list_album_images(&album_key_resolved).await {
+                        Ok(images) => {
+                            images.iter().any(|img| img.image_key == image_key)
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to verify image: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    if !image_exists {
+                        println!("\n✗ Image not found in album: {}", image_key);
+                        println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                        return Ok(());
+                    }
+
+                    // List comments
+                    println!("Fetching comments...\n");
+                    match client.list_image_comments(&image_key).await {
+                        Ok(comments) => {
+                            if comments.is_empty() {
+                                println!("No comments found for this image.");
+                            } else {
+                                println!("✓ Found {} comments for image {}:\n", format_number(comments.len()), image_key);
+                                for comment in comments {
+                                    if let Some(key) = &comment.comment_key {
+                                        println!("  Comment Key: {}", key);
+                                    }
+                                    if let Some(name) = &comment.name {
+                                        println!("  Author:      {}", name);
+                                    } else {
+                                        println!("  Author:      Anonymous");
+                                    }
+                                    if let Some(rating) = comment.rating {
+                                        let stars = "★".repeat(rating as usize) + &"☆".repeat((5 - rating) as usize);
+                                        println!("  Rating:      {} ({}/5)", stars, rating);
+                                    }
+                                    println!("  Text:        {}", comment.text);
+                                    if let Some(date) = &comment.date {
+                                        println!("  Date:        {}", date);
+                                    }
+                                    println!();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list comments: {}", e);
+                        }
+                    }
+                }
+                CommentCommands::Create { album, image_key, text, name, email, rating } => {
+                    println!("Looking up album: {}", album);
+
+                    // Try to find album by name or use as key
+                    let album_key_resolved = match client.list_albums().await {
+                        Ok(albums) => {
+                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                                found.album_key.clone()
+                            } else {
+                                println!("\n✗ Album not found: {}", album);
+                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list albums: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Verify the image exists in the album
+                    println!("Verifying image exists...");
+                    let image_info = match client.list_album_images(&album_key_resolved).await {
+                        Ok(images) => {
+                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                                found.clone()
+                            } else {
+                                println!("\n✗ Image not found in album: {}", image_key);
+                                println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                                return Ok(());
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to list images: {}", e);
+                            return Ok(());
+                        }
+                    };
+
+                    // Show image details and comment preview
+                    println!("\nImage: {}", image_info.file_name);
+                    println!("Comment preview:");
+                    println!("  Author: {}", name.as_deref().unwrap_or("Anonymous"));
+                    println!("  Text: {}", text);
+                    if let Some(r) = rating {
+                        println!("  Rating: {}/5", r);
+                    }
+
+                    // Confirm
+                    use dialoguer::Confirm;
+                    let confirmed = Confirm::new()
+                        .with_prompt("Post this comment?")
+                        .default(true)
+                        .interact()?;
+
+                    if !confirmed {
+                        println!("\nComment cancelled.");
+                        return Ok(());
+                    }
+
+                    // Create comment
+                    println!("\nPosting comment...");
+                    let request = api::comments::CreateCommentRequest {
+                        text,
+                        name,
+                        email,
+                        rating,
+                        link: None,
+                    };
+
+                    match client.create_image_comment(&image_key, request).await {
+                        Ok(comment) => {
+                            println!("\n✓ Comment posted successfully!");
+                            if let Some(key) = comment.comment_key {
+                                println!("  Comment Key: {}", key);
+                            }
+                        }
+                        Err(e) => {
+                            println!("\n✗ Failed to post comment: {}", e);
+                        }
+                    }
+                }
+            }
+        }
         Commands::Upload { path, threads, album, parent, dry_run, check_remote, no_cache } => {
             let cfg = config::load_config()?;
             let client = std::sync::Arc::new(api::SmugMugClient::new(
@@ -1139,20 +1462,22 @@ async fn main() -> Result<()> {
                         check_remote,
                         no_cache,
                         cache_path,
+                        retry_attempts: cfg.upload.retry_attempts,
+                        has_smugmug_source: cfg.upload.has_smugmug_source,
                     };
 
                     // Perform upload
                     match uploader::upload_files(upload_options).await {
                         Ok(stats) => {
-                            println!("\n✓ Upload complete!");
-                            println!("  Total files: {}", stats.total_files);
-                            println!("  Uploaded: {}", stats.uploaded);
-                            println!("  Skipped (duplicates): {}", stats.skipped);
-                            println!("  Failed: {}", stats.failed);
-                            println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                            println!("\n{}", success("Upload complete!"));
+                            println!("  {}: {}", info("Total files"), highlight(&stats.total_files.to_string()));
+                            println!("  {}: {}", "Uploaded".green(), highlight(&stats.uploaded.to_string()));
+                            println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
+                            println!("  {}: {}", "Failed".red(), stats.failed);
+                            println!("  {}: {}", info("Total size"), highlight(&format!("{:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0)));
                         }
                         Err(e) => {
-                            println!("\n✗ Upload failed: {}", e);
+                            println!("\n{}", error(&format!("Upload failed: {}", e)));
                         }
                     }
                 }
@@ -1165,19 +1490,21 @@ async fn main() -> Result<()> {
                         check_remote,
                         no_cache,
                         cache_path,
+                        retry_attempts: cfg.upload.retry_attempts,
+                        has_smugmug_source: cfg.upload.has_smugmug_source,
                     }).await {
                         Ok(stats) => {
-                            println!("\n✓ Upload complete!");
-                            println!("  Total files: {}", stats.total_files);
-                            println!("  Uploaded: {}", stats.uploaded);
-                            println!("  Skipped (duplicates): {}", stats.skipped);
-                            println!("  Failed: {}", stats.failed);
-                            println!("  Folders created: {}", stats.folders_created);
-                            println!("  Albums created: {}", stats.albums_created);
-                            println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                            println!("\n{}", success("Upload complete!"));
+                            println!("  {}: {}", info("Total files"), highlight(&stats.total_files.to_string()));
+                            println!("  {}: {}", "Uploaded".green(), highlight(&stats.uploaded.to_string()));
+                            println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
+                            println!("  {}: {}", "Failed".red(), stats.failed);
+                            println!("  {}: {}", info("Folders created"), highlight(&stats.folders_created.to_string()));
+                            println!("  {}: {}", info("Albums created"), highlight(&stats.albums_created.to_string()));
+                            println!("  {}: {}", info("Total size"), highlight(&format!("{:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0)));
                         }
                         Err(e) => {
-                            println!("\n✗ Upload failed: {}", e);
+                            println!("\n{}", error(&format!("Upload failed: {}", e)));
                         }
                     }
                 }

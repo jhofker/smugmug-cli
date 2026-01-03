@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde_json::Value;
 
 pub mod albums;
+pub mod comments;
 pub mod images;
 pub mod upload;
 
@@ -71,6 +72,35 @@ impl SmugMugClient {
 
         let response = self.client
             .get(url)
+            .headers(headers)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let body_text = response.text().await?;
+
+        if !status.is_success() {
+            anyhow::bail!("API request failed with status {}: {}", status, body_text);
+        }
+
+        let body: Value = serde_json::from_str(&body_text)?;
+        Ok(body)
+    }
+
+    pub async fn get_user_features(&self, user_uri: &str) -> Result<Value> {
+        let url = format!("https://api.smugmug.com{}!features", user_uri);
+
+        let oauth_header = self.build_oauth_header("GET", &url);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&oauth_header)?,
+        );
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let response = self.client
+            .get(&url)
             .headers(headers)
             .send()
             .await?;

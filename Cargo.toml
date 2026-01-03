@@ -5,6 +5,8 @@ edition = "2021"
 authors = ["Jordan Hofker <jhofker@gmail.com"]
 description = "A command-line tool for uploading photos to SmugMug with deduplication"
 license = "MIT"
+repository = "https://github.com/jhofker/smugmug-cli"
+homepage = "https://github.com/jhofker/smugmug-cli"
 
 [lib]
 name = "smugmug_cli"
@@ -58,3 +60,8 @@ dotenvy = "0.15"
 mockito = "1.5"
 tempfile = "3.14"
 tokio-test = "0.4"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

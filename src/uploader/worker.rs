@@ -20,6 +20,22 @@ pub struct UploadWorkerContext {
     pub remote_md5s: Option<Arc<std::collections::HashMap<String, String>>>,
     pub dry_run: bool,
     pub no_cache: bool,
+    pub retry_attempts: u32,
+}
+
+/// Determines if an error is retryable (transient) or permanent
+fn is_retryable_error(error: &anyhow::Error) -> bool {
+    let error_msg = error.to_string().to_lowercase();
+
+    // Retry on network errors, timeouts, and 5xx server errors
+    error_msg.contains("timeout")
+        || error_msg.contains("connection")
+        || error_msg.contains("network")
+        || error_msg.contains("500")
+        || error_msg.contains("502")
+        || error_msg.contains("503")
+        || error_msg.contains("504")
+        || error_msg.contains("429") // Rate limiting
 }
 
 pub async fn upload_worker(
@@ -58,33 +74,55 @@ pub async fn upload_worker(
         return Ok(UploadStatus::DryRun { file_size });
     }
 
-    // Upload file
-    let upload_result = upload_image(
-        &context.client,
-        &context.album_uri,
-        file_path,
-    )
-    .await
-    .with_context(|| "Failed to upload image")?;
+    // Upload file with retry logic
+    let mut last_error = None;
+    let max_attempts = context.retry_attempts.max(1); // At least 1 attempt
 
-    // Update cache
-    let uploaded_file = UploadedFile {
-        smugmug_uri: upload_result.image_uri.clone(),
-        album_key: context.album_key.clone(),
-        image_key: upload_result.image_key.clone(),
-        uploaded_at: Utc::now(),
-        file_size,
-        original_path: file_path.to_string_lossy().to_string(),
-    };
+    for attempt in 1..=max_attempts {
+        match upload_image(
+            &context.client,
+            &context.album_uri,
+            file_path,
+        )
+        .await
+        {
+            Ok(upload_result) => {
+                // Success! Update cache and return
+                let uploaded_file = UploadedFile {
+                    smugmug_uri: upload_result.image_uri.clone(),
+                    album_key: context.album_key.clone(),
+                    image_key: upload_result.image_key.clone(),
+                    uploaded_at: Utc::now(),
+                    file_size,
+                    original_path: file_path.to_string_lossy().to_string(),
+                };
 
-    {
-        let store = context.hash_store.lock().await;
-        store.insert(&hash, uploaded_file)?;
+                {
+                    let store = context.hash_store.lock().await;
+                    store.insert(&hash, uploaded_file)?;
+                }
+
+                return Ok(UploadStatus::Uploaded { file_size });
+            }
+            Err(e) => {
+                let error = e.context("Failed to upload image");
+
+                // Check if we should retry
+                if attempt < max_attempts && is_retryable_error(&error) {
+                    // Calculate exponential backoff: 1s, 2s, 4s, 8s...
+                    let delay_secs = 2u64.pow(attempt - 1);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+                    last_error = Some(error);
+                } else {
+                    // Don't retry - either last attempt or non-retryable error
+                    return Err(error);
+                }
+            }
+        }
     }
 
-    Ok(UploadStatus::Uploaded {
-        file_size,
-    })
+    // If we get here, all retries failed
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Upload failed after retries")))
 }
 
 pub enum UploadStatus {
@@ -249,6 +287,7 @@ mod tests {
             remote_md5s: None,
             dry_run: true,
             no_cache: false,
+            retry_attempts: 3,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -297,6 +336,7 @@ mod tests {
             remote_md5s: None,
             dry_run: false,
             no_cache: false,
+            retry_attempts: 3,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -338,6 +378,7 @@ mod tests {
             remote_md5s: Some(Arc::new(remote_md5s)),
             dry_run: false,
             no_cache: false,
+            retry_attempts: 3,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -386,6 +427,7 @@ mod tests {
             remote_md5s: None,
             dry_run: true, // Use dry run to avoid actual upload
             no_cache: true, // This should bypass local cache
+            retry_attempts: 3,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -421,6 +463,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_is_retryable_error_timeout() {
+        let error = anyhow::anyhow!("Connection timeout occurred");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_connection() {
+        let error = anyhow::anyhow!("Connection refused");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_network() {
+        let error = anyhow::anyhow!("Network error encountered");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_500() {
+        let error = anyhow::anyhow!("Server returned 500 Internal Server Error");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_502() {
+        let error = anyhow::anyhow!("502 Bad Gateway");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_503() {
+        let error = anyhow::anyhow!("503 Service Unavailable");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_504() {
+        let error = anyhow::anyhow!("504 Gateway Timeout");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_retryable_error_rate_limit() {
+        let error = anyhow::anyhow!("429 Too Many Requests");
+        assert!(is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_auth() {
+        let error = anyhow::anyhow!("401 Unauthorized");
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_not_found() {
+        let error = anyhow::anyhow!("404 Not Found");
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_validation() {
+        let error = anyhow::anyhow!("Invalid input: file too large");
+        assert!(!is_retryable_error(&error));
+    }
+
+    #[test]
+    fn test_is_not_retryable_error_forbidden() {
+        let error = anyhow::anyhow!("403 Forbidden");
+        assert!(!is_retryable_error(&error));
+    }
+
     #[tokio::test]
     async fn test_upload_worker_context_creation() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -445,6 +559,7 @@ mod tests {
             remote_md5s: Some(Arc::new(remote_md5s)),
             dry_run: false,
             no_cache: true,
+            retry_attempts: 3,
         };
 
         assert_eq!(context.album_uri, "/api/v2/album/ABC123");
