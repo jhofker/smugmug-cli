@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -21,23 +21,22 @@ pub struct HashStore {
 impl HashStore {
     /// Create a new HashStore at the specified path
     pub fn new(path: &str) -> Result<Self> {
-        let db = sled::open(path)
-            .context("Failed to open sled database")?;
+        let db = sled::open(path).context("Failed to open sled database")?;
 
-        Ok(HashStore {
-            db: Arc::new(db),
-        })
+        Ok(HashStore { db: Arc::new(db) })
     }
 
     /// Get an uploaded file by its hash
     pub fn get(&self, hash: &str) -> Result<Option<UploadedFile>> {
-        let value = self.db.get(hash.as_bytes())
+        let value = self
+            .db
+            .get(hash.as_bytes())
             .context("Failed to read from database")?;
 
         match value {
             Some(bytes) => {
-                let file: UploadedFile = serde_json::from_slice(&bytes)
-                    .context("Failed to deserialize UploadedFile")?;
+                let file: UploadedFile =
+                    serde_json::from_slice(&bytes).context("Failed to deserialize UploadedFile")?;
                 Ok(Some(file))
             }
             None => Ok(None),
@@ -46,25 +45,22 @@ impl HashStore {
 
     /// Insert a new uploaded file record
     pub fn insert(&self, hash: &str, file: UploadedFile) -> Result<()> {
-        let serialized = serde_json::to_vec(&file)
-            .context("Failed to serialize UploadedFile")?;
+        let serialized = serde_json::to_vec(&file).context("Failed to serialize UploadedFile")?;
 
-        self.db.insert(hash.as_bytes(), serialized)
+        self.db
+            .insert(hash.as_bytes(), serialized)
             .context("Failed to insert into database")?;
 
-        self.db.flush()
-            .context("Failed to flush database")?;
+        self.db.flush().context("Failed to flush database")?;
 
         Ok(())
     }
 
     /// Clear all entries from the cache
     pub fn clear(&self) -> Result<()> {
-        self.db.clear()
-            .context("Failed to clear database")?;
+        self.db.clear().context("Failed to clear database")?;
 
-        self.db.flush()
-            .context("Failed to flush database")?;
+        self.db.flush().context("Failed to flush database")?;
 
         Ok(())
     }

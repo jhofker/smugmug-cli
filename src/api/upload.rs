@@ -1,5 +1,5 @@
 use anyhow::Result;
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use md5::Context;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -175,8 +175,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("POST", "/")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("POST", "/")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("content-type", mockito::Matcher::Any)
             .match_header("content-md5", mockito::Matcher::Any)
             .match_header("x-smug-albumuri", "/api/v2/album/ABC123")
@@ -184,12 +188,14 @@ mod tests {
             .match_header("x-smug-version", "v2")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "stat": "ok",
                 "Image": {
                     "ImageUri": "/api/v2/album/ABC123/image/IMG123-0"
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
@@ -205,15 +211,18 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("POST", "/")
+        let _mock = server
+            .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "stat": "ok",
                 "Image": {
                     "ImageUri": "/api/v2/album/ABC123/image/IMG123-0"
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
     }
@@ -227,7 +236,8 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("POST", "/")
+        let _mock = server
+            .mock("POST", "/")
             .with_status(400)
             .with_body("Bad Request: Invalid album URI")
             .create_async()
@@ -245,7 +255,10 @@ mod tests {
 
         let response: UploadResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.stat, "ok");
-        assert_eq!(response.image.image_uri, "/api/v2/album/ABC123/image/IMG123-0");
+        assert_eq!(
+            response.image.image_uri,
+            "/api/v2/album/ABC123/image/IMG123-0"
+        );
     }
 
     #[test]

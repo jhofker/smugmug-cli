@@ -40,9 +40,12 @@ pub struct UploadStats {
     pub total_bytes: u64,
     pub folders_created: usize,
     pub albums_created: usize,
+    pub duration_secs: u64,
 }
 
 pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
+    let start_time = std::time::Instant::now();
+
     // Initialize hash store for deduplication
     let hash_store = Arc::new(Mutex::new(
         HashStore::new(&options.cache_path.to_string_lossy())
@@ -50,8 +53,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     ));
 
     // Scan directory for files
-    let scanned_files = scan_directory(&options.path)
-        .context("Failed to scan directory")?;
+    let scanned_files = scan_directory(&options.path).context("Failed to scan directory")?;
 
     if scanned_files.is_empty() {
         println!("No files found to upload");
@@ -63,6 +65,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             total_bytes: 0,
             folders_created: 0,
             albums_created: 0,
+            duration_secs: start_time.elapsed().as_secs(),
         });
     }
 
@@ -73,10 +76,25 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         .collect();
 
     if !raw_files.is_empty() && !options.has_smugmug_source {
-        println!("\n{} {}", "⚠".yellow().bold(), format!("Warning: {} RAW files detected", raw_files.len()).yellow().bold());
-        println!("   {}", "RAW file uploads require a SmugMug Source subscription.".yellow());
-        println!("   {}", "These uploads will likely fail without SmugMug Source.".yellow());
-        println!("   {}\n", "(Update config with 'smugmug-cli init' if you have Source)".bright_black());
+        println!(
+            "\n{} {}",
+            "⚠".yellow().bold(),
+            format!("Warning: {} RAW files detected", raw_files.len())
+                .yellow()
+                .bold()
+        );
+        println!(
+            "   {}",
+            "RAW file uploads require a SmugMug Source subscription.".yellow()
+        );
+        println!(
+            "   {}",
+            "These uploads will likely fail without SmugMug Source.".yellow()
+        );
+        println!(
+            "   {}\n",
+            "(Update config with 'smugmug-cli init' if you have Source)".bright_black()
+        );
 
         use dialoguer::Confirm;
         let proceed = Confirm::new()
@@ -94,6 +112,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
                 total_bytes: 0,
                 folders_created: 0,
                 albums_created: 0,
+                duration_secs: start_time.elapsed().as_secs(),
             });
         }
     }
@@ -111,7 +130,9 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     let overall_progress = multi_progress.add(ProgressBar::new(scanned_files.len() as u64));
     overall_progress.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
             .unwrap()
             .progress_chars("#>-"),
     );
@@ -119,15 +140,24 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     // Fetch remote MD5s if check_remote is enabled
     let remote_md5s = if options.check_remote {
         println!("Fetching existing images from SmugMug...");
-        match options.client.list_album_images(&options.album.album_key).await {
+        match options
+            .client
+            .list_album_images(&options.album.album_key)
+            .await
+        {
             Ok(images) => {
                 let md5_map: std::collections::HashMap<String, String> = images
                     .iter()
                     .filter_map(|img| {
-                        img.archived_md5.as_ref().map(|md5| (md5.to_lowercase(), img.image_key.clone()))
+                        img.archived_md5
+                            .as_ref()
+                            .map(|md5| (md5.to_lowercase(), img.image_key.clone()))
                     })
                     .collect();
-                println!("Found {} images with MD5 hashes on SmugMug\n", md5_map.len());
+                println!(
+                    "Found {} images with MD5 hashes on SmugMug\n",
+                    md5_map.len()
+                );
                 Some(Arc::new(md5_map))
             }
             Err(e) => {
@@ -150,6 +180,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         dry_run: options.dry_run,
         no_cache: options.no_cache,
         retry_attempts: options.retry_attempts,
+        skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     // Track statistics
@@ -161,6 +192,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         total_bytes: 0,
         folders_created: 0,
         albums_created: 0,
+        duration_secs: 0,
     }));
 
     // Process files with concurrent workers
@@ -202,7 +234,8 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
                             UploadStatus::DryRun { file_size, .. } => {
                                 stats.uploaded += 1;
                                 stats.total_bytes += file_size;
-                                progress.set_message(format!("Would upload: {}", file_path.display()));
+                                progress
+                                    .set_message(format!("Would upload: {}", file_path.display()));
                             }
                         }
                         progress.inc(1);
@@ -237,6 +270,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         total_bytes: final_stats.total_bytes,
         folders_created: 0,
         albums_created: 0,
+        duration_secs: start_time.elapsed().as_secs(),
     })
 }
 
@@ -253,6 +287,8 @@ pub struct UploadStructureOptions {
 
 pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<UploadStats> {
     use std::collections::HashMap;
+
+    let start_time = std::time::Instant::now();
 
     // Initialize hash store for deduplication
     let hash_store = Arc::new(Mutex::new(
@@ -281,7 +317,10 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
                 // Check if this is a supported file using the scanner module
                 if crate::scanner::is_supported_file(&path) {
                     let parent = path.parent().unwrap().to_path_buf();
-                    folder_map.entry(parent).or_insert_with(Vec::new).push(path.clone());
+                    folder_map
+                        .entry(parent)
+                        .or_insert_with(Vec::new)
+                        .push(path.clone());
                     all_files.push(path);
                 }
             }
@@ -298,10 +337,25 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
         .collect();
 
     if !raw_files.is_empty() && !options.has_smugmug_source {
-        println!("\n{} {}", "⚠".yellow().bold(), format!("Warning: {} RAW files detected", raw_files.len()).yellow().bold());
-        println!("   {}", "RAW file uploads require a SmugMug Source subscription.".yellow());
-        println!("   {}", "These uploads will likely fail without SmugMug Source.".yellow());
-        println!("   {}\n", "(Update config with 'smugmug-cli init' if you have Source)".bright_black());
+        println!(
+            "\n{} {}",
+            "⚠".yellow().bold(),
+            format!("Warning: {} RAW files detected", raw_files.len())
+                .yellow()
+                .bold()
+        );
+        println!(
+            "   {}",
+            "RAW file uploads require a SmugMug Source subscription.".yellow()
+        );
+        println!(
+            "   {}",
+            "These uploads will likely fail without SmugMug Source.".yellow()
+        );
+        println!(
+            "   {}\n",
+            "(Update config with 'smugmug-cli init' if you have Source)".bright_black()
+        );
 
         use dialoguer::Confirm;
         let proceed = Confirm::new()
@@ -319,6 +373,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
                 total_bytes: 0,
                 folders_created: 0,
                 albums_created: 0,
+                duration_secs: start_time.elapsed().as_secs(),
             });
         }
     }
@@ -333,12 +388,17 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             total_bytes: 0,
             folders_created: 0,
             albums_created: 0,
+            duration_secs: start_time.elapsed().as_secs(),
         });
     }
 
     // Count total files
     let total_files: usize = folder_map.values().map(|v| v.len()).sum();
-    println!("Found {} files in {} folders\n", total_files, folder_map.len());
+    println!(
+        "Found {} files in {} folders\n",
+        total_files,
+        folder_map.len()
+    );
 
     // Track statistics
     let stats = Arc::new(Mutex::new(UploadStats {
@@ -349,6 +409,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
         total_bytes: 0,
         folders_created: 0,
         albums_created: 0,
+        duration_secs: 0,
     }));
 
     // Get the authenticated user's node URI
@@ -391,14 +452,19 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
 
     // Create a map to cache node URIs for each folder path
     let node_cache: Arc<Mutex<HashMap<PathBuf, String>>> = Arc::new(Mutex::new(HashMap::new()));
-    node_cache.lock().await.insert(options.path.clone(), root_node_uri);
+    node_cache
+        .lock()
+        .await
+        .insert(options.path.clone(), root_node_uri);
 
     // Setup progress bar
     let multi_progress = MultiProgress::new();
     let overall_progress = multi_progress.add(ProgressBar::new(total_files as u64));
     overall_progress.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
             .unwrap()
             .progress_chars("#>-"),
     );
@@ -412,10 +478,16 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             &folder_path,
             &node_cache,
             &stats,
-        ).await {
+        )
+        .await
+        {
             Ok(album) => album,
             Err(e) => {
-                println!("✗ Failed to create folder structure for {}: {}", folder_path.display(), e);
+                println!(
+                    "✗ Failed to create folder structure for {}: {}",
+                    folder_path.display(),
+                    e
+                );
                 let mut s = stats.lock().await;
                 s.failed += files.len();
                 continue;
@@ -429,13 +501,18 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
                     let md5_map: std::collections::HashMap<String, String> = images
                         .iter()
                         .filter_map(|img| {
-                            img.archived_md5.as_ref().map(|md5| (md5.to_lowercase(), img.image_key.clone()))
+                            img.archived_md5
+                                .as_ref()
+                                .map(|md5| (md5.to_lowercase(), img.image_key.clone()))
                         })
                         .collect();
                     Some(Arc::new(md5_map))
                 }
                 Err(e) => {
-                    println!("Warning: Failed to fetch remote MD5s for {}: {}", album.name, e);
+                    println!(
+                        "Warning: Failed to fetch remote MD5s for {}: {}",
+                        album.name, e
+                    );
                     None
                 }
             }
@@ -453,6 +530,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             dry_run: options.dry_run,
             no_cache: options.no_cache,
             retry_attempts: options.retry_attempts,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
         // Upload files in this folder
@@ -464,16 +542,19 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
                         UploadStatus::Uploaded { file_size, .. } => {
                             s.uploaded += 1;
                             s.total_bytes += file_size;
-                            overall_progress.set_message(format!("Uploaded: {}", file_path.display()));
+                            overall_progress
+                                .set_message(format!("Uploaded: {}", file_path.display()));
                         }
                         UploadStatus::Skipped { .. } => {
                             s.skipped += 1;
-                            overall_progress.set_message(format!("Skipped: {}", file_path.display()));
+                            overall_progress
+                                .set_message(format!("Skipped: {}", file_path.display()));
                         }
                         UploadStatus::DryRun { file_size, .. } => {
                             s.uploaded += 1;
                             s.total_bytes += file_size;
-                            overall_progress.set_message(format!("Would upload: {}", file_path.display()));
+                            overall_progress
+                                .set_message(format!("Would upload: {}", file_path.display()));
                         }
                     }
                     overall_progress.inc(1);
@@ -481,7 +562,11 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
                 Err(e) => {
                     let mut s = stats.lock().await;
                     s.failed += 1;
-                    overall_progress.set_message(format!("Failed: {} - {}", file_path.display(), e));
+                    overall_progress.set_message(format!(
+                        "Failed: {} - {}",
+                        file_path.display(),
+                        e
+                    ));
                     overall_progress.inc(1);
                 }
             }
@@ -500,6 +585,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
         total_bytes: final_stats.total_bytes,
         folders_created: final_stats.folders_created,
         albums_created: final_stats.albums_created,
+        duration_secs: start_time.elapsed().as_secs(),
     })
 }
 
@@ -515,7 +601,8 @@ async fn get_or_create_folder_structure(
 
     // If this is the base directory, create an album at the root
     if rel_path.as_os_str().is_empty() {
-        let album_name = base_path.file_name()
+        let album_name = base_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("Uploads")
             .to_string();
@@ -524,9 +611,32 @@ async fn get_or_create_folder_structure(
         let parent_node_uri = cache.get(base_path).unwrap().clone();
         drop(cache);
 
-        let album = client.create_album(&album_name, Some(&parent_node_uri)).await?;
-        let mut s = stats.lock().await;
-        s.albums_created += 1;
+        let album = match client
+            .create_album(&album_name, Some(&parent_node_uri), "Private")
+            .await
+        {
+            Ok(album) => {
+                let mut s = stats.lock().await;
+                s.albums_created += 1;
+                album
+            }
+            Err(e) => {
+                // If we get a conflict (409), try to find the existing album
+                let error_msg = e.to_string();
+                if error_msg.contains("409") || error_msg.contains("Conflict") {
+                    // Album already exists, try to find it
+                    match client
+                        .find_album_in_folder(&parent_node_uri, &album_name)
+                        .await?
+                    {
+                        Some(album) => album,
+                        None => return Err(e), // Album should exist but we can't find it
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         return Ok(album);
     }
 
@@ -556,26 +666,66 @@ async fn get_or_create_folder_structure(
             let is_last = i == components.len() - 1;
 
             if is_last {
-                // Last component - create an album
-                let album = client.create_album(component_name, Some(&parent_node_uri)).await?;
+                // Last component - create an album (private by default)
+                let album = match client
+                    .create_album(component_name, Some(&parent_node_uri), "Private")
+                    .await
+                {
+                    Ok(album) => {
+                        let mut s = stats.lock().await;
+                        s.albums_created += 1;
+                        album
+                    }
+                    Err(e) => {
+                        // If we get a conflict (409), try to find the existing album
+                        let error_msg = e.to_string();
+                        if error_msg.contains("409") || error_msg.contains("Conflict") {
+                            // Album already exists, try to find it
+                            match client
+                                .find_album_in_folder(&parent_node_uri, component_name)
+                                .await?
+                            {
+                                Some(album) => album,
+                                None => return Err(e), // Album should exist but we can't find it
+                            }
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
 
                 // Cache the album's node URI
                 let mut cache = node_cache.lock().await;
-                cache.insert(current_path.clone(), format!("/api/v2/node/{}", album.node_id));
-
-                let mut s = stats.lock().await;
-                s.albums_created += 1;
+                cache.insert(
+                    current_path.clone(),
+                    format!("/api/v2/node/{}", album.node_id),
+                );
 
                 return Ok(album);
             } else {
                 // Intermediate component - create a folder
-                let folder_node_uri = create_folder(client, component_name, &parent_node_uri).await?;
+                let folder_node_uri = match create_folder(client, component_name, &parent_node_uri)
+                    .await
+                {
+                    Ok(uri) => {
+                        let mut s = stats.lock().await;
+                        s.folders_created += 1;
+                        uri
+                    }
+                    Err(e) => {
+                        // If we get a conflict (409), try to find the existing folder
+                        let error_msg = e.to_string();
+                        if error_msg.contains("409") || error_msg.contains("Conflict") {
+                            // Folder already exists, find it
+                            find_existing_folder(client, component_name, &parent_node_uri).await?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
 
                 let mut cache = node_cache.lock().await;
                 cache.insert(current_path.clone(), folder_node_uri);
-
-                let mut s = stats.lock().await;
-                s.folders_created += 1;
             }
         }
     }
@@ -624,6 +774,49 @@ async fn create_folder(
 
     let node_response: CreateNodeResponse = serde_json::from_str(&body_text)?;
     Ok(node_response.response.node.uri)
+}
+
+async fn find_existing_folder(
+    client: &Arc<SmugMugClient>,
+    name: &str,
+    parent_node_uri: &str,
+) -> Result<String> {
+    // Get children of the parent node
+    let children_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
+    let response = client.get_with_auth(&children_url).await?;
+
+    #[derive(serde::Deserialize)]
+    struct ChildrenResponse {
+        #[serde(rename = "Response")]
+        response: ChildrenResponseData,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ChildrenResponseData {
+        #[serde(rename = "Node")]
+        nodes: Vec<NodeInfo>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct NodeInfo {
+        #[serde(rename = "Name")]
+        name: String,
+        #[serde(rename = "Type")]
+        node_type: String,
+        #[serde(rename = "Uri")]
+        uri: String,
+    }
+
+    let children: ChildrenResponse = response.json().await?;
+
+    // Find the folder with the matching name
+    for node in children.response.nodes {
+        if node.node_type == "Folder" && node.name == name {
+            return Ok(node.uri);
+        }
+    }
+
+    anyhow::bail!("Folder '{}' not found in parent node", name)
 }
 
 #[cfg(test)]
@@ -684,6 +877,7 @@ mod tests {
             total_bytes: 0,
             folders_created: 0,
             albums_created: 0,
+            duration_secs: 0,
         };
 
         assert_eq!(stats.total_files, 10);
@@ -705,6 +899,7 @@ mod tests {
             total_bytes: 0,
             folders_created: 0,
             albums_created: 0,
+            duration_secs: 0,
         };
 
         // Simulate progress
@@ -804,6 +999,7 @@ mod tests {
             total_bytes: 0,
             folders_created: 0,
             albums_created: 0,
+            duration_secs: 0,
         }));
 
         let mut handles = vec![];
@@ -841,6 +1037,7 @@ mod tests {
             total_bytes: 0,
             folders_created: 0,
             albums_created: 0,
+            duration_secs: 0,
         };
 
         assert_eq!(stats.total_files, 0);
@@ -857,6 +1054,7 @@ mod tests {
             total_bytes: 50_000_000_000, // 50GB
             folders_created: 100,
             albums_created: 50,
+            duration_secs: 0,
         };
 
         assert_eq!(stats.total_files, 10000);
@@ -919,7 +1117,11 @@ mod tests {
             .iter()
             .map(|(_, path)| {
                 let name = path.file_name().unwrap().to_str().unwrap();
-                let num_str = name.strip_prefix("image").unwrap().strip_suffix(".jpg").unwrap();
+                let num_str = name
+                    .strip_prefix("image")
+                    .unwrap()
+                    .strip_suffix(".jpg")
+                    .unwrap();
                 num_str.parse().unwrap()
             })
             .collect();
@@ -938,6 +1140,7 @@ mod tests {
             total_bytes: 1_073_741_824, // 1GB
             folders_created: 5,
             albums_created: 3,
+            duration_secs: 0,
         };
 
         // Verify all files accounted for

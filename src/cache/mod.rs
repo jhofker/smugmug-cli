@@ -14,8 +14,7 @@ pub fn get_cache_path() -> Result<PathBuf> {
     let cache_dir = project_dirs.cache_dir().join("hash_store");
 
     // Ensure the cache directory exists
-    std::fs::create_dir_all(&cache_dir)
-        .context("Failed to create cache directory")?;
+    std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
 
     Ok(cache_dir)
 }

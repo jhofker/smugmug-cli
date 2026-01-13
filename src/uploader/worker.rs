@@ -21,6 +21,7 @@ pub struct UploadWorkerContext {
     pub dry_run: bool,
     pub no_cache: bool,
     pub retry_attempts: u32,
+    pub skip_raw_files: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Determines if an error is retryable (transient) or permanent
@@ -42,9 +43,18 @@ pub async fn upload_worker(
     file_path: &Path,
     context: Arc<UploadWorkerContext>,
 ) -> Result<UploadStatus> {
+    // Check if this is a RAW file and RAW uploads are disabled
+    let is_raw = crate::scanner::is_raw_file(file_path);
+    if is_raw
+        && context
+            .skip_raw_files
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return Ok(UploadStatus::Skipped);
+    }
+
     // Calculate file hash (SHA256 for local cache)
-    let hash = calculate_file_hash(file_path)
-        .with_context(|| "Failed to calculate file hash")?;
+    let hash = calculate_file_hash(file_path).with_context(|| "Failed to calculate file hash")?;
 
     // Check local cache first (unless no_cache is enabled)
     if !context.no_cache {
@@ -56,8 +66,8 @@ pub async fn upload_worker(
 
     // Check remote MD5s if enabled
     if let Some(ref remote_md5s) = context.remote_md5s {
-        let md5_hash = calculate_md5_hash(file_path)
-            .with_context(|| "Failed to calculate MD5 hash")?;
+        let md5_hash =
+            calculate_md5_hash(file_path).with_context(|| "Failed to calculate MD5 hash")?;
 
         if remote_md5s.contains_key(&md5_hash.to_lowercase()) {
             return Ok(UploadStatus::Skipped);
@@ -79,13 +89,7 @@ pub async fn upload_worker(
     let max_attempts = context.retry_attempts.max(1); // At least 1 attempt
 
     for attempt in 1..=max_attempts {
-        match upload_image(
-            &context.client,
-            &context.album_uri,
-            file_path,
-        )
-        .await
-        {
+        match upload_image(&context.client, &context.album_uri, file_path).await {
             Ok(upload_result) => {
                 // Success! Update cache and return
                 let uploaded_file = UploadedFile {
@@ -107,6 +111,17 @@ pub async fn upload_worker(
             Err(e) => {
                 let error = e.context("Failed to upload image");
 
+                // If this is a RAW file and upload failed, disable future RAW uploads
+                if is_raw {
+                    let was_already_set = context
+                        .skip_raw_files
+                        .swap(true, std::sync::atomic::Ordering::Relaxed);
+                    if !was_already_set {
+                        eprintln!("\n⚠️  RAW file upload failed. Skipping remaining RAW files.");
+                        eprintln!("   (RAW files require a SmugMug Source subscription)");
+                    }
+                }
+
                 // Check if we should retry
                 if attempt < max_attempts && is_retryable_error(&error) {
                     // Calculate exponential backoff: 1s, 2s, 4s, 8s...
@@ -126,13 +141,9 @@ pub async fn upload_worker(
 }
 
 pub enum UploadStatus {
-    Uploaded {
-        file_size: u64,
-    },
+    Uploaded { file_size: u64 },
     Skipped,
-    DryRun {
-        file_size: u64,
-    },
+    DryRun { file_size: u64 },
 }
 
 pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
@@ -209,7 +220,10 @@ mod tests {
         let hash = calculate_file_hash(file.path()).unwrap();
 
         // SHA256 of empty file
-        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
@@ -269,7 +283,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let hash_store = Arc::new(Mutex::new(
-            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap(),
         ));
 
         let client = Arc::new(SmugMugClient::new(
@@ -288,6 +302,7 @@ mod tests {
             dry_run: true,
             no_cache: false,
             retry_attempts: 3,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -306,7 +321,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let hash_store = Arc::new(Mutex::new(
-            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap(),
         ));
 
         // Pre-populate cache
@@ -319,7 +334,11 @@ mod tests {
             file_size: 100,
             original_path: file.path().to_string_lossy().to_string(),
         };
-        hash_store.lock().await.insert(&hash, uploaded_file).unwrap();
+        hash_store
+            .lock()
+            .await
+            .insert(&hash, uploaded_file)
+            .unwrap();
 
         let client = Arc::new(SmugMugClient::new(
             "test_key".to_string(),
@@ -337,6 +356,7 @@ mod tests {
             dry_run: false,
             no_cache: false,
             retry_attempts: 3,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -355,7 +375,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let hash_store = Arc::new(Mutex::new(
-            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap(),
         ));
 
         // Calculate MD5 and add to remote map
@@ -379,6 +399,7 @@ mod tests {
             dry_run: false,
             no_cache: false,
             retry_attempts: 3,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -397,7 +418,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
 
         let hash_store = Arc::new(Mutex::new(
-            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap(),
         ));
 
         // Pre-populate cache
@@ -410,7 +431,11 @@ mod tests {
             file_size: 100,
             original_path: file.path().to_string_lossy().to_string(),
         };
-        hash_store.lock().await.insert(&hash, uploaded_file).unwrap();
+        hash_store
+            .lock()
+            .await
+            .insert(&hash, uploaded_file)
+            .unwrap();
 
         let client = Arc::new(SmugMugClient::new(
             "test_key".to_string(),
@@ -425,9 +450,10 @@ mod tests {
             album_key: "test_album".to_string(),
             hash_store,
             remote_md5s: None,
-            dry_run: true, // Use dry run to avoid actual upload
+            dry_run: true,  // Use dry run to avoid actual upload
             no_cache: true, // This should bypass local cache
             retry_attempts: 3,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -453,7 +479,7 @@ mod tests {
         }
 
         match skipped {
-            UploadStatus::Skipped => {},
+            UploadStatus::Skipped => {}
             _ => panic!("Wrong variant"),
         }
 
@@ -539,7 +565,7 @@ mod tests {
     async fn test_upload_worker_context_creation() {
         let temp_dir = tempfile::tempdir().unwrap();
         let hash_store = Arc::new(Mutex::new(
-            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap()
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap(),
         ));
 
         let client = Arc::new(SmugMugClient::new(
@@ -560,6 +586,7 @@ mod tests {
             dry_run: false,
             no_cache: true,
             retry_attempts: 3,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         assert_eq!(context.album_uri, "/api/v2/album/ABC123");

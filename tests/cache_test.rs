@@ -1,9 +1,9 @@
 use anyhow::Result;
 use chrono::Utc;
-use std::fs::File;
-use std::io::Write;
 use smugmug_cli::cache::hash_store::{HashStore, UploadedFile};
 use smugmug_cli::uploader::calculate_file_hash;
+use std::fs::File;
+use std::io::Write;
 
 #[test]
 fn test_hash_calculation() -> Result<()> {
@@ -158,7 +158,8 @@ fn test_thread_safety() -> Result<()> {
     use std::thread;
 
     // Create a temporary cache directory
-    let cache_dir = std::env::temp_dir().join(format!("smugmug_test_threads_{}", std::process::id()));
+    let cache_dir =
+        std::env::temp_dir().join(format!("smugmug_test_threads_{}", std::process::id()));
     std::fs::create_dir_all(&cache_dir)?;
 
     let store = Arc::new(HashStore::new(cache_dir.to_str().unwrap())?);

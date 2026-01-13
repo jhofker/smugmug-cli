@@ -10,8 +10,7 @@ pub struct ScannedFile {
 
 /// Scan a directory recursively for supported image and video files
 pub fn scan_directory(path: &Path) -> Result<Vec<ScannedFile>> {
-    let entries = walker::walk_directory(path)
-        .context("Failed to walk directory")?;
+    let entries = walker::walk_directory(path).context("Failed to walk directory")?;
 
     let mut scanned_files = Vec::new();
 
@@ -59,8 +58,22 @@ pub fn is_raw_file(path: &Path) -> bool {
 
     matches!(
         extension.as_str(),
-        "raw" | "dng" | "cr2" | "cr3" | "nef" | "arw" | "orf" | "raf" |
-        "rw2" | "pef" | "srw" | "erf" | "mrw" | "3fr" | "fff" | "iiq"
+        "raw"
+            | "dng"
+            | "cr2"
+            | "cr3"
+            | "nef"
+            | "arw"
+            | "orf"
+            | "raf"
+            | "rw2"
+            | "pef"
+            | "srw"
+            | "erf"
+            | "mrw"
+            | "3fr"
+            | "fff"
+            | "iiq"
     )
 }
 
@@ -255,11 +268,7 @@ mod tests {
         // Check that nested files are found
         let nested_files: Vec<_> = scanned
             .iter()
-            .filter(|f| {
-                f.path
-                    .to_string_lossy()
-                    .contains("nested")
-            })
+            .filter(|f| f.path.to_string_lossy().contains("nested"))
             .collect();
 
         // Should find nested_photo.jpg, nested_video.mp4, and deep_photo.png
@@ -278,8 +287,12 @@ mod tests {
         // walkdir may return Ok with empty results for non-existent paths
         // or it may return an error - either is acceptable behavior
         match result {
-            Ok(files) => assert_eq!(files.len(), 0, "Should return empty results for invalid path"),
-            Err(_) => {}, // Error is also acceptable
+            Ok(files) => assert_eq!(
+                files.len(),
+                0,
+                "Should return empty results for invalid path"
+            ),
+            Err(_) => {} // Error is also acceptable
         }
     }
 
@@ -364,11 +377,7 @@ mod tests {
         let scanned = scan_directory(temp_dir.path()).expect("Failed to scan directory");
 
         // Should find both the real file and the symlink (walker follows links)
-        assert_eq!(
-            scanned.len(),
-            2,
-            "Should find both real file and symlink"
-        );
+        assert_eq!(scanned.len(), 2, "Should find both real file and symlink");
     }
 
     #[test]

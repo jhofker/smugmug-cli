@@ -64,17 +64,10 @@ impl SmugMugClient {
         let oauth_header = self.build_oauth_header("GET", url);
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&oauth_header)?,
-        );
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -93,17 +86,10 @@ impl SmugMugClient {
         let oauth_header = self.build_oauth_header("GET", &url);
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&oauth_header)?,
-        );
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -123,14 +109,14 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        Ok(self.client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await?)
+        Ok(self.client.get(url).headers(headers).send().await?)
     }
 
-    pub async fn post_with_auth(&self, url: &str, body: serde_json::Value) -> Result<reqwest::Response> {
+    pub async fn post_with_auth(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+    ) -> Result<reqwest::Response> {
         let oauth_header = self.build_oauth_header("POST", url);
 
         let mut headers = HeaderMap::new();
@@ -138,7 +124,8 @@ impl SmugMugClient {
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
-        Ok(self.client
+        Ok(self
+            .client
             .post(url)
             .headers(headers)
             .json(&body)
@@ -153,14 +140,14 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        Ok(self.client
-            .delete(url)
-            .headers(headers)
-            .send()
-            .await?)
+        Ok(self.client.delete(url).headers(headers).send().await?)
     }
 
-    pub async fn patch_with_auth(&self, url: &str, body: serde_json::Value) -> Result<reqwest::Response> {
+    pub async fn patch_with_auth(
+        &self,
+        url: &str,
+        body: serde_json::Value,
+    ) -> Result<reqwest::Response> {
         let oauth_header = self.build_oauth_header("PATCH", url);
 
         let mut headers = HeaderMap::new();
@@ -168,7 +155,8 @@ impl SmugMugClient {
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
-        Ok(self.client
+        Ok(self
+            .client
             .patch(url)
             .headers(headers)
             .json(&body)
@@ -268,8 +256,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_auth_user_success() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("GET", "/api/v2!authuser")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let mock = server
+            .mock("GET", "/api/v2!authuser")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -294,8 +286,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_auth_user_unauthorized() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("GET", "/api/v2!authuser")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let mock = server
+            .mock("GET", "/api/v2!authuser")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()

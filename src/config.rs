@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use colored::*;
-use dialoguer::{Input, Confirm};
+use dialoguer::{Confirm, Input};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -67,8 +67,7 @@ fn get_config_path() -> Result<PathBuf> {
         .context("Failed to determine config directory")?;
 
     let config_dir = proj_dirs.config_dir();
-    fs::create_dir_all(config_dir)
-        .context("Failed to create config directory")?;
+    fs::create_dir_all(config_dir).context("Failed to create config directory")?;
 
     Ok(config_dir.join("config.toml"))
 }
@@ -121,7 +120,10 @@ pub async fn init_config() -> Result<()> {
     };
 
     // Test authentication and detect SmugMug Source
-    println!("\n{}", "Testing authentication and detecting features...".cyan());
+    println!(
+        "\n{}",
+        "Testing authentication and detecting features...".cyan()
+    );
 
     let test_client = crate::api::SmugMugClient::new(
         api_key.clone(),
@@ -141,17 +143,43 @@ pub async fn init_config() -> Result<()> {
                 match test_client.get_user_features(user_uri).await {
                     Ok(features) => {
                         // Check PremiumStorage field to detect SmugMug Source
-                        if let Some(premium_storage) = features["Response"]["Features"]["PremiumStorage"].as_bool() {
+                        if let Some(premium_storage) =
+                            features["Response"]["Features"]["PremiumStorage"].as_bool()
+                        {
                             has_smugmug_source = premium_storage;
 
                             if premium_storage {
-                                println!("{} {}", "✓".green().bold(), "Detected SmugMug Source subscription (PremiumStorage enabled)".green());
-                                println!("  {} {}", "→".bright_cyan(), "RAW file uploads enabled".cyan());
-                                println!("  {} {}", "→".bright_cyan(), "Original file downloads enabled".cyan());
-                                println!("  {} {}\n", "→".bright_cyan(), "Cloud storage backup enabled".cyan());
+                                println!(
+                                    "{} {}",
+                                    "✓".green().bold(),
+                                    "Detected SmugMug Source subscription (PremiumStorage enabled)"
+                                        .green()
+                                );
+                                println!(
+                                    "  {} {}",
+                                    "→".bright_cyan(),
+                                    "RAW file uploads enabled".cyan()
+                                );
+                                println!(
+                                    "  {} {}",
+                                    "→".bright_cyan(),
+                                    "Original file downloads enabled".cyan()
+                                );
+                                println!(
+                                    "  {} {}\n",
+                                    "→".bright_cyan(),
+                                    "Cloud storage backup enabled".cyan()
+                                );
                             } else {
-                                println!("{} {}", "ℹ".cyan().bold(), "SmugMug Source not detected".cyan());
-                                println!("  {}\n", "RAW file uploads will not be available".bright_black());
+                                println!(
+                                    "{} {}",
+                                    "ℹ".cyan().bold(),
+                                    "SmugMug Source not detected".cyan()
+                                );
+                                println!(
+                                    "  {}\n",
+                                    "RAW file uploads will not be available".bright_black()
+                                );
                             }
 
                             // Allow user to override detection
@@ -168,7 +196,11 @@ pub async fn init_config() -> Result<()> {
                             }
                         } else {
                             // Couldn't detect, ask user
-                            println!("{} {}", "⚠".yellow().bold(), "Could not auto-detect SmugMug Source".yellow());
+                            println!(
+                                "{} {}",
+                                "⚠".yellow().bold(),
+                                "Could not auto-detect SmugMug Source".yellow()
+                            );
                             has_smugmug_source = Confirm::new()
                                 .with_prompt("Do you have a SmugMug Source subscription?")
                                 .default(false)
@@ -177,7 +209,11 @@ pub async fn init_config() -> Result<()> {
                     }
                     Err(_) => {
                         // Couldn't fetch features, ask user
-                        println!("{} {}", "⚠".yellow().bold(), "Could not fetch account features".yellow());
+                        println!(
+                            "{} {}",
+                            "⚠".yellow().bold(),
+                            "Could not fetch account features".yellow()
+                        );
                         has_smugmug_source = Confirm::new()
                             .with_prompt("Do you have a SmugMug Source subscription?")
                             .default(false)
@@ -187,7 +223,11 @@ pub async fn init_config() -> Result<()> {
             }
         }
         Err(e) => {
-            println!("{} {}", "✗".red().bold(), format!("Authentication test failed: {}", e).red());
+            println!(
+                "{} {}",
+                "✗".red().bold(),
+                format!("Authentication test failed: {}", e).red()
+            );
             println!("{}", "Please verify your credentials are correct.".yellow());
             return Err(e);
         }
@@ -203,8 +243,16 @@ pub async fn init_config() -> Result<()> {
     save_config(&config)?;
 
     let config_path = get_config_path()?;
-    println!("\n{} {}", "✓".green().bold(), format!("Configuration saved to: {}", config_path.display()).green());
-    println!("\n{} {}", "You can now upload photos using:".cyan(), "smugmug-cli upload <path>".bright_white().bold());
+    println!(
+        "\n{} {}",
+        "✓".green().bold(),
+        format!("Configuration saved to: {}", config_path.display()).green()
+    );
+    println!(
+        "\n{} {}",
+        "You can now upload photos using:".cyan(),
+        "smugmug-cli upload <path>".bright_white().bold()
+    );
 
     Ok(())
 }
@@ -221,11 +269,9 @@ pub fn load_config() -> Result<Config> {
         );
     }
 
-    let contents = fs::read_to_string(&config_path)
-        .context("Failed to read config file")?;
+    let contents = fs::read_to_string(&config_path).context("Failed to read config file")?;
 
-    let config: Config = toml::from_str(&contents)
-        .context("Failed to parse config file")?;
+    let config: Config = toml::from_str(&contents).context("Failed to parse config file")?;
 
     Ok(config)
 }
@@ -233,19 +279,30 @@ pub fn load_config() -> Result<Config> {
 pub fn save_config(config: &Config) -> Result<()> {
     let config_path = get_config_path()?;
 
-    let toml_string = toml::to_string_pretty(config)
-        .context("Failed to serialize config")?;
+    let toml_string = toml::to_string_pretty(config).context("Failed to serialize config")?;
 
-    fs::write(&config_path, toml_string)
-        .context("Failed to write config file")?;
+    fs::write(&config_path, toml_string).context("Failed to write config file")?;
 
     Ok(())
+}
+
+pub fn is_auth_configured() -> bool {
+    // Try to load config
+    let config = match load_config() {
+        Ok(cfg) => cfg,
+        Err(_) => return false,
+    };
+
+    // Check if all auth fields are filled out
+    !config.auth.api_key.is_empty()
+        && !config.auth.api_secret.is_empty()
+        && !config.auth.access_token.is_empty()
+        && !config.auth.access_token_secret.is_empty()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
 
     // Helper function to create a test config
     fn create_test_config() -> Config {
@@ -286,15 +343,19 @@ mod tests {
 
         // Deduplication defaults
         assert!(config.deduplication.enabled);
-        assert!(config.deduplication.cache_path.to_string_lossy().ends_with("hashes.db"));
+        assert!(config
+            .deduplication
+            .cache_path
+            .to_string_lossy()
+            .ends_with("hashes.db"));
     }
 
     #[test]
     fn test_config_serialization_to_toml() {
         let config = create_test_config();
 
-        let toml_string = toml::to_string_pretty(&config)
-            .expect("Failed to serialize config to TOML");
+        let toml_string =
+            toml::to_string_pretty(&config).expect("Failed to serialize config to TOML");
 
         // Verify the TOML contains expected keys
         assert!(toml_string.contains("api_key"));
@@ -334,14 +395,17 @@ enabled = true
 cache_path = "/custom/path/cache.db"
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Failed to deserialize config from TOML");
+        let config: Config =
+            toml::from_str(toml_string).expect("Failed to deserialize config from TOML");
 
         // Verify auth fields
         assert_eq!(config.auth.api_key, "deserialize_api_key");
         assert_eq!(config.auth.api_secret, "deserialize_api_secret");
         assert_eq!(config.auth.access_token, "deserialize_access_token");
-        assert_eq!(config.auth.access_token_secret, "deserialize_access_token_secret");
+        assert_eq!(
+            config.auth.access_token_secret,
+            "deserialize_access_token_secret"
+        );
 
         // Verify upload fields
         assert_eq!(config.upload.threads, 16);
@@ -350,7 +414,10 @@ cache_path = "/custom/path/cache.db"
 
         // Verify deduplication fields
         assert!(config.deduplication.enabled);
-        assert_eq!(config.deduplication.cache_path, PathBuf::from("/custom/path/cache.db"));
+        assert_eq!(
+            config.deduplication.cache_path,
+            PathBuf::from("/custom/path/cache.db")
+        );
     }
 
     #[test]
@@ -358,23 +425,50 @@ cache_path = "/custom/path/cache.db"
         let original_config = create_test_config();
 
         // Serialize to TOML
-        let toml_string = toml::to_string_pretty(&original_config)
-            .expect("Failed to serialize config");
+        let toml_string =
+            toml::to_string_pretty(&original_config).expect("Failed to serialize config");
 
         // Deserialize back to Config
-        let deserialized_config: Config = toml::from_str(&toml_string)
-            .expect("Failed to deserialize config");
+        let deserialized_config: Config =
+            toml::from_str(&toml_string).expect("Failed to deserialize config");
 
         // Verify all fields match
-        assert_eq!(original_config.auth.api_key, deserialized_config.auth.api_key);
-        assert_eq!(original_config.auth.api_secret, deserialized_config.auth.api_secret);
-        assert_eq!(original_config.auth.access_token, deserialized_config.auth.access_token);
-        assert_eq!(original_config.auth.access_token_secret, deserialized_config.auth.access_token_secret);
-        assert_eq!(original_config.upload.threads, deserialized_config.upload.threads);
-        assert_eq!(original_config.upload.retry_attempts, deserialized_config.upload.retry_attempts);
-        assert_eq!(original_config.upload.timeout_seconds, deserialized_config.upload.timeout_seconds);
-        assert_eq!(original_config.deduplication.enabled, deserialized_config.deduplication.enabled);
-        assert_eq!(original_config.deduplication.cache_path, deserialized_config.deduplication.cache_path);
+        assert_eq!(
+            original_config.auth.api_key,
+            deserialized_config.auth.api_key
+        );
+        assert_eq!(
+            original_config.auth.api_secret,
+            deserialized_config.auth.api_secret
+        );
+        assert_eq!(
+            original_config.auth.access_token,
+            deserialized_config.auth.access_token
+        );
+        assert_eq!(
+            original_config.auth.access_token_secret,
+            deserialized_config.auth.access_token_secret
+        );
+        assert_eq!(
+            original_config.upload.threads,
+            deserialized_config.upload.threads
+        );
+        assert_eq!(
+            original_config.upload.retry_attempts,
+            deserialized_config.upload.retry_attempts
+        );
+        assert_eq!(
+            original_config.upload.timeout_seconds,
+            deserialized_config.upload.timeout_seconds
+        );
+        assert_eq!(
+            original_config.deduplication.enabled,
+            deserialized_config.deduplication.enabled
+        );
+        assert_eq!(
+            original_config.deduplication.cache_path,
+            deserialized_config.deduplication.cache_path
+        );
     }
 
     #[test]
@@ -386,7 +480,10 @@ api_key = "test"
 "#;
 
         let result: Result<Config, _> = toml::from_str(invalid_toml);
-        assert!(result.is_err(), "Should fail when required fields are missing");
+        assert!(
+            result.is_err(),
+            "Should fail when required fields are missing"
+        );
     }
 
     #[test]
@@ -431,8 +528,8 @@ enabled = true
 cache_path = "/tmp/cache.db"
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Should parse config with 0 threads");
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with 0 threads");
         assert_eq!(config.upload.threads, 0);
     }
 
@@ -455,8 +552,8 @@ enabled = true
 cache_path = "/tmp/cache.db"
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Should parse config with large values");
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with large values");
         assert_eq!(config.upload.threads, 999999);
         assert_eq!(config.upload.retry_attempts, u32::MAX);
         assert_eq!(config.upload.timeout_seconds, 9999999999);
@@ -481,8 +578,8 @@ enabled = true
 cache_path = ""
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Should parse config with empty strings");
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with empty strings");
         assert_eq!(config.auth.api_key, "");
         assert_eq!(config.auth.api_secret, "");
         assert_eq!(config.auth.access_token, "");
@@ -509,8 +606,8 @@ enabled = true
 cache_path = "/tmp/cache with spaces.db"
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Should parse config with special characters");
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with special characters");
         assert!(config.auth.api_key.contains("!@#$"));
         assert!(config.auth.access_token.contains(" "));
     }
@@ -534,8 +631,8 @@ enabled = false
 cache_path = "/tmp/cache.db"
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Should parse config with deduplication disabled");
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with deduplication disabled");
         assert!(!config.deduplication.enabled);
     }
 
@@ -559,9 +656,12 @@ enabled = true
 cache_path = "relative/path/cache.db"
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Should parse config with relative path");
-        assert_eq!(config.deduplication.cache_path, PathBuf::from("relative/path/cache.db"));
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with relative path");
+        assert_eq!(
+            config.deduplication.cache_path,
+            PathBuf::from("relative/path/cache.db")
+        );
 
         // Test absolute path
         let toml_string = r#"
@@ -581,9 +681,12 @@ enabled = true
 cache_path = "/absolute/path/cache.db"
 "#;
 
-        let config: Config = toml::from_str(toml_string)
-            .expect("Should parse config with absolute path");
-        assert_eq!(config.deduplication.cache_path, PathBuf::from("/absolute/path/cache.db"));
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with absolute path");
+        assert_eq!(
+            config.deduplication.cache_path,
+            PathBuf::from("/absolute/path/cache.db")
+        );
     }
 
     #[test]
@@ -650,5 +753,63 @@ cache_path = "/absolute/path/cache.db"
         assert_eq!(config.auth.api_key, "test_key");
         assert_eq!(config.upload.threads, 8);
         assert!(config.deduplication.enabled);
+    }
+
+    #[test]
+    fn test_is_auth_configured_with_empty_fields() {
+        let toml_string = r#"
+[auth]
+api_key = ""
+api_secret = ""
+access_token = ""
+access_token_secret = ""
+
+[upload]
+threads = 4
+retry_attempts = 3
+timeout_seconds = 300
+
+[deduplication]
+enabled = true
+cache_path = "/tmp/cache.db"
+"#;
+
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with empty auth fields");
+
+        // Verify that empty strings are detected as not configured
+        assert!(config.auth.api_key.is_empty());
+        assert!(config.auth.api_secret.is_empty());
+        assert!(config.auth.access_token.is_empty());
+        assert!(config.auth.access_token_secret.is_empty());
+    }
+
+    #[test]
+    fn test_is_auth_configured_with_filled_fields() {
+        let toml_string = r#"
+[auth]
+api_key = "test_key"
+api_secret = "test_secret"
+access_token = "test_token"
+access_token_secret = "test_token_secret"
+
+[upload]
+threads = 4
+retry_attempts = 3
+timeout_seconds = 300
+
+[deduplication]
+enabled = true
+cache_path = "/tmp/cache.db"
+"#;
+
+        let config: Config =
+            toml::from_str(toml_string).expect("Should parse config with filled auth fields");
+
+        // Verify that filled strings are properly populated
+        assert!(!config.auth.api_key.is_empty());
+        assert!(!config.auth.api_secret.is_empty());
+        assert!(!config.auth.access_token.is_empty());
+        assert!(!config.auth.access_token_secret.is_empty());
     }
 }

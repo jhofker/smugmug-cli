@@ -156,7 +156,8 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
+        let response = self
+            .client
             .get(auth_user_url)
             .headers(headers.clone())
             .send()
@@ -181,11 +182,7 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&albums_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&albums_url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -200,14 +197,22 @@ impl SmugMugClient {
         let mut albums = albums_data.response.albums;
         for album in &mut albums {
             if album.web_uri.is_none() {
-                album.web_uri = Some(format!("https://{}.smugmug.com/{}", user_nickname, album.url_name));
+                album.web_uri = Some(format!(
+                    "https://{}.smugmug.com/{}",
+                    user_nickname, album.url_name
+                ));
             }
         }
 
         Ok(albums)
     }
 
-    pub async fn create_album(&self, name: &str, parent_node_uri: Option<&str>) -> Result<Album> {
+    pub async fn create_album(
+        &self,
+        name: &str,
+        parent_node_uri: Option<&str>,
+        privacy: &str,
+    ) -> Result<Album> {
         // Get the parent node URI and user nickname (default to user's root node)
         let (parent_uri, user_nickname) = if let Some(uri) = parent_node_uri {
             // If parent URI is provided, we still need to get the nickname
@@ -218,7 +223,8 @@ impl SmugMugClient {
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
             headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-            let response = self.client
+            let response = self
+                .client
                 .get(auth_user_url)
                 .headers(headers)
                 .send()
@@ -242,7 +248,8 @@ impl SmugMugClient {
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
             headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-            let response = self.client
+            let response = self
+                .client
                 .get(auth_user_url)
                 .headers(headers)
                 .send()
@@ -256,7 +263,10 @@ impl SmugMugClient {
             }
 
             let user_data: UserResponse = serde_json::from_str(&body_text)?;
-            (user_data.response.user.uris.node.uri, user_data.response.user.nickname)
+            (
+                user_data.response.user.uris.node.uri,
+                user_data.response.user.nickname,
+            )
         };
 
         // Create the album by POSTing to the parent node's children
@@ -271,12 +281,13 @@ impl SmugMugClient {
         let body = serde_json::json!({
             "Type": "Album",
             "Name": name,
-            "Privacy": "Public",
+            "Privacy": privacy,
             "SortMethod": "DateAdded",
             "SortDirection": "Ascending"
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&create_url)
             .headers(headers)
             .json(&body)
@@ -313,11 +324,7 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&album_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&album_url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -337,11 +344,7 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&node_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&node_url).headers(headers).send().await?;
 
         let body_text = response.text().await?;
 
@@ -365,16 +368,26 @@ impl SmugMugClient {
 
         if let Ok(node_details) = serde_json::from_str::<NodeDetailsResponse>(&body_text) {
             // Use the full UrlPath which includes parent folders
-            album.web_uri = Some(format!("https://{}.smugmug.com{}", user_nickname, node_details.response.node.url_path));
+            album.web_uri = Some(format!(
+                "https://{}.smugmug.com{}",
+                user_nickname, node_details.response.node.url_path
+            ));
         } else {
             // Fallback to just the album url_name if we can't get the node details
-            album.web_uri = Some(format!("https://{}.smugmug.com/{}", user_nickname, album.url_name));
+            album.web_uri = Some(format!(
+                "https://{}.smugmug.com/{}",
+                user_nickname, album.url_name
+            ));
         }
 
         Ok(album)
     }
 
-    pub async fn find_album_in_folder(&self, parent_node_uri: &str, album_name: &str) -> Result<Option<Album>> {
+    pub async fn find_album_in_folder(
+        &self,
+        parent_node_uri: &str,
+        album_name: &str,
+    ) -> Result<Option<Album>> {
         // First, fetch the node details to get the proper ChildNodes URI
         let node_url = format!("https://api.smugmug.com{}", parent_node_uri);
         let oauth_header = self.build_oauth_header("GET", &node_url);
@@ -383,11 +396,7 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&node_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&node_url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -458,7 +467,8 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
+        let response = self
+            .client
             .get(&children_url)
             .headers(headers)
             .send()
@@ -520,24 +530,24 @@ impl SmugMugClient {
 
         // Look for existing album with this name
         for node in children_response.response.nodes {
-                if node.name == album_name && node.node_type == "Album" {
-                    // The children response already has most of the info we need.
-                    // Just need to extract the album key from the URI.
-                    let album_uri = &node.uris.album.uri;
-                    let album_key = album_uri.split('/').last().unwrap_or("");
+            if node.name == album_name && node.node_type == "Album" {
+                // The children response already has most of the info we need.
+                // Just need to extract the album key from the URI.
+                let album_uri = &node.uris.album.uri;
+                let album_key = album_uri.split('/').last().unwrap_or("");
 
-                    let album = Album {
-                        album_key: album_key.to_string(),
-                        name: node.name.clone(),
-                        url_name: node.url_name.clone(),
-                        node_id: node.node_id.clone(),
-                        uri: album_uri.clone(),
-                        web_uri: Some(node.web_uri.clone()),
-                        uris: None,
-                    };
+                let album = Album {
+                    album_key: album_key.to_string(),
+                    name: node.name.clone(),
+                    url_name: node.url_name.clone(),
+                    node_id: node.node_id.clone(),
+                    uri: album_uri.clone(),
+                    web_uri: Some(node.web_uri.clone()),
+                    uris: None,
+                };
 
-                    return Ok(Some(album));
-                }
+                return Ok(Some(album));
+            }
         }
 
         Ok(None)
@@ -552,7 +562,8 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
+        let response = self
+            .client
             .get(auth_user_url)
             .headers(headers)
             .send()
@@ -567,13 +578,19 @@ impl SmugMugClient {
 
         for folder_name in path_parts {
             // Check if folder exists in current node's children
-            current_node_uri = self.find_or_create_child_folder(&current_node_uri, folder_name).await?;
+            current_node_uri = self
+                .find_or_create_child_folder(&current_node_uri, folder_name)
+                .await?;
         }
 
         Ok(current_node_uri)
     }
 
-    async fn find_or_create_child_folder(&self, parent_node_uri: &str, folder_name: &str) -> Result<String> {
+    async fn find_or_create_child_folder(
+        &self,
+        parent_node_uri: &str,
+        folder_name: &str,
+    ) -> Result<String> {
         // Get children of parent node
         let children_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
         let oauth_header = self.build_oauth_header("GET", &children_url);
@@ -582,7 +599,8 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
+        let response = self
+            .client
             .get(&children_url)
             .headers(headers)
             .send()
@@ -635,7 +653,8 @@ impl SmugMugClient {
             "Name": folder_name,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&create_url)
             .headers(headers)
             .json(&body)
@@ -680,11 +699,7 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&album_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&album_url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -721,8 +736,8 @@ impl SmugMugClient {
             }
         }
 
-        // Album not found, try to create it
-        match self.create_album(name, None).await {
+        // Album not found, try to create it (private by default)
+        match self.create_album(name, None, "Private").await {
             Ok(album) => Ok(album),
             Err(e) => {
                 // If we get a conflict error, the album likely exists but wasn't in the cached list
@@ -754,7 +769,8 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
+        let response = self
+            .client
             .get(auth_user_url)
             .headers(headers)
             .send()
@@ -768,129 +784,132 @@ impl SmugMugClient {
         self.fetch_node_tree(&root_node_uri).await
     }
 
-    fn fetch_node_tree<'a>(&'a self, node_uri: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<super::NodeTree>> + 'a>> {
+    fn fetch_node_tree<'a>(
+        &'a self,
+        node_uri: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<super::NodeTree>> + 'a>> {
         Box::pin(async move {
-        let node_url = format!("https://api.smugmug.com{}", node_uri);
-        let oauth_header = self.build_oauth_header("GET", &node_url);
+            let node_url = format!("https://api.smugmug.com{}", node_uri);
+            let oauth_header = self.build_oauth_header("GET", &node_url);
 
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+            headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&node_url)
-            .headers(headers)
-            .send()
-            .await?;
+            let response = self.client.get(&node_url).headers(headers).send().await?;
 
-        let body_text = response.text().await?;
+            let body_text = response.text().await?;
 
-        #[derive(serde::Deserialize)]
-        struct NodeResponse {
-            #[serde(rename = "Response")]
-            response: NodeResponseData,
-        }
+            #[derive(serde::Deserialize)]
+            struct NodeResponse {
+                #[serde(rename = "Response")]
+                response: NodeResponseData,
+            }
 
-        #[derive(serde::Deserialize)]
-        struct NodeResponseData {
-            #[serde(rename = "Node")]
-            node: NodeData,
-        }
+            #[derive(serde::Deserialize)]
+            struct NodeResponseData {
+                #[serde(rename = "Node")]
+                node: NodeData,
+            }
 
-        #[derive(serde::Deserialize)]
-        struct NodeData {
-            #[serde(rename = "Name")]
-            name: String,
-            #[serde(rename = "Type")]
-            node_type: String,
-            #[serde(rename = "HasChildren")]
-            has_children: bool,
-            #[serde(rename = "Uris", skip_serializing_if = "Option::is_none")]
-            uris: Option<NodeChildUris>,
-        }
+            #[derive(serde::Deserialize)]
+            struct NodeData {
+                #[serde(rename = "Name")]
+                name: String,
+                #[serde(rename = "Type")]
+                node_type: String,
+                #[serde(rename = "HasChildren")]
+                has_children: bool,
+                #[serde(rename = "Uris", skip_serializing_if = "Option::is_none")]
+                uris: Option<NodeChildUris>,
+            }
 
-        #[derive(serde::Deserialize)]
-        struct NodeChildUris {
-            #[serde(rename = "ChildNodes")]
-            child_nodes: Option<ChildNodesUri>,
-        }
+            #[derive(serde::Deserialize)]
+            struct NodeChildUris {
+                #[serde(rename = "ChildNodes")]
+                child_nodes: Option<ChildNodesUri>,
+            }
 
-        #[derive(serde::Deserialize)]
-        struct ChildNodesUri {
-            #[serde(rename = "Uri")]
-            uri: String,
-        }
+            #[derive(serde::Deserialize)]
+            struct ChildNodesUri {
+                #[serde(rename = "Uri")]
+                uri: String,
+            }
 
-        let node_response: NodeResponse = serde_json::from_str(&body_text)?;
-        let node_data = node_response.response.node;
+            let node_response: NodeResponse = serde_json::from_str(&body_text)?;
+            let node_data = node_response.response.node;
 
-        let mut children = Vec::new();
+            let mut children = Vec::new();
 
-        // Fetch children if the node has any
-        if node_data.has_children {
-            if let Some(uris) = node_data.uris {
-                if let Some(child_nodes_uri_obj) = uris.child_nodes {
-                    let children_url = format!("https://api.smugmug.com{}", child_nodes_uri_obj.uri);
-                    let oauth_header = self.build_oauth_header("GET", &children_url);
+            // Fetch children if the node has any
+            if node_data.has_children {
+                if let Some(uris) = node_data.uris {
+                    if let Some(child_nodes_uri_obj) = uris.child_nodes {
+                        let children_url =
+                            format!("https://api.smugmug.com{}", child_nodes_uri_obj.uri);
+                        let oauth_header = self.build_oauth_header("GET", &children_url);
 
-                    let mut headers = HeaderMap::new();
-                    headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-                    headers.insert("Accept", HeaderValue::from_static("application/json"));
+                        let mut headers = HeaderMap::new();
+                        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+                        headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-                    let response = self.client
-                        .get(&children_url)
-                        .headers(headers)
-                        .send()
-                        .await?;
+                        let response = self
+                            .client
+                            .get(&children_url)
+                            .headers(headers)
+                            .send()
+                            .await?;
 
-                    let body_text = response.text().await?;
+                        let body_text = response.text().await?;
 
-                    #[derive(serde::Deserialize)]
-                    struct ChildNodesResponse {
-                        #[serde(rename = "Response")]
-                        response: ChildNodesResponseData,
-                    }
+                        #[derive(serde::Deserialize)]
+                        struct ChildNodesResponse {
+                            #[serde(rename = "Response")]
+                            response: ChildNodesResponseData,
+                        }
 
-                    #[derive(serde::Deserialize)]
-                    struct ChildNodesResponseData {
-                        #[serde(rename = "Node")]
-                        nodes: Vec<ChildNodeData>,
-                    }
+                        #[derive(serde::Deserialize)]
+                        struct ChildNodesResponseData {
+                            #[serde(rename = "Node")]
+                            nodes: Vec<ChildNodeData>,
+                        }
 
-                    #[derive(serde::Deserialize)]
-                    struct ChildNodeData {
-                        #[serde(rename = "Uri")]
-                        uri: String,
-                    }
+                        #[derive(serde::Deserialize)]
+                        struct ChildNodeData {
+                            #[serde(rename = "Uri")]
+                            uri: String,
+                        }
 
-                    let children_response: ChildNodesResponse = serde_json::from_str(&body_text)?;
+                        let children_response: ChildNodesResponse =
+                            serde_json::from_str(&body_text)?;
 
-                    // Recursively fetch each child
-                    for child_node in children_response.response.nodes {
-                        match self.fetch_node_tree(&child_node.uri).await {
-                            Ok(child_tree) => children.push(child_tree),
-                            Err(e) => {
-                                eprintln!("Warning: Failed to fetch child node: {}", e);
+                        // Recursively fetch each child
+                        for child_node in children_response.response.nodes {
+                            match self.fetch_node_tree(&child_node.uri).await {
+                                Ok(child_tree) => children.push(child_tree),
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to fetch child node: {}", e);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        Ok(super::NodeTree {
-            name: node_data.name,
-            node_type: node_data.node_type,
-            children,
-        })
+            Ok(super::NodeTree {
+                name: node_data.name,
+                node_type: node_data.node_type,
+                children,
+            })
         })
     }
 
-    pub async fn update_album_settings(&self, album_key: &str, settings: AlbumSettingsUpdate) -> Result<()> {
-        let update_url = format!(
-            "https://api.smugmug.com/api/v2/album/{}",
-            album_key
-        );
+    pub async fn update_album_settings(
+        &self,
+        album_key: &str,
+        settings: AlbumSettingsUpdate,
+    ) -> Result<()> {
+        let update_url = format!("https://api.smugmug.com/api/v2/album/{}", album_key);
 
         // Build JSON body with only provided fields
         let mut body = serde_json::json!({});
@@ -921,7 +940,11 @@ impl SmugMugClient {
         let body_text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!("Failed to update album settings: {} - {}", status, body_text);
+            anyhow::bail!(
+                "Failed to update album settings: {} - {}",
+                status,
+                body_text
+            );
         }
 
         Ok(())
@@ -930,18 +953,17 @@ impl SmugMugClient {
     /// Request album download ZIP generation
     pub async fn request_album_download(&self, album_key: &str) -> Result<AlbumDownloadInfo> {
         // First, get the album to find its download URI
-        let album_url = format!("https://api.smugmug.com/api/v2/album/{}?_expand=Uris", album_key);
+        let album_url = format!(
+            "https://api.smugmug.com/api/v2/album/{}?_expand=Uris",
+            album_key
+        );
         let oauth_header = self.build_oauth_header("GET", &album_url);
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&album_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&album_url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -954,7 +976,8 @@ impl SmugMugClient {
         let album = album_response.response.album;
 
         // Check if album has download URI
-        let download_uri = album.uris
+        let download_uri = album
+            .uris
             .and_then(|uris| uris.album_download)
             .map(|download| download.uri)
             .ok_or_else(|| anyhow::anyhow!("Album does not have a download URI"))?;
@@ -967,7 +990,11 @@ impl SmugMugClient {
         let body_text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!("Failed to request album download: {} - {}", status, body_text);
+            anyhow::bail!(
+                "Failed to request album download: {} - {}",
+                status,
+                body_text
+            );
         }
 
         // Parse the response
@@ -988,14 +1015,18 @@ impl SmugMugClient {
     }
 
     /// Check the status of an album download
-    pub async fn check_album_download_status(&self, download_uri: &str) -> Result<AlbumDownloadInfo> {
+    pub async fn check_album_download_status(
+        &self,
+        download_uri: &str,
+    ) -> Result<AlbumDownloadInfo> {
         let oauth_header = self.build_oauth_header("GET", download_uri);
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
+        let response = self
+            .client
             .get(download_uri)
             .headers(headers)
             .send()
@@ -1005,7 +1036,11 @@ impl SmugMugClient {
         let body_text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!("Failed to check download status: {} - {}", status, body_text);
+            anyhow::bail!(
+                "Failed to check download status: {} - {}",
+                status,
+                body_text
+            );
         }
 
         #[derive(Debug, Deserialize)]
@@ -1030,7 +1065,8 @@ impl SmugMugClient {
 
         // Request download
         let info = self.request_album_download(album_key).await?;
-        let download_uri = info.uri
+        let download_uri = info
+            .uri
             .ok_or_else(|| anyhow::anyhow!("No URI returned from download request"))?;
 
         // Poll for completion
@@ -1039,7 +1075,8 @@ impl SmugMugClient {
 
             match status.status.as_deref() {
                 Some("Ready") => {
-                    return status.download_url
+                    return status
+                        .download_url
                         .ok_or_else(|| anyhow::anyhow!("Download ready but no URL provided"));
                 }
                 Some("Failed") => {
@@ -1059,7 +1096,10 @@ impl SmugMugClient {
             }
         }
 
-        anyhow::bail!("Timeout waiting for download. Check status at: {}", download_uri)
+        anyhow::bail!(
+            "Timeout waiting for download. Check status at: {}",
+            download_uri
+        )
     }
 }
 
@@ -1122,11 +1162,16 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         // Mock the authuser endpoint
-        let _mock_auth = server.mock("GET", "/api/v2!authuser")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_auth = server
+            .mock("GET", "/api/v2!authuser")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "User": {
                         "Uri": "/api/v2/user/testuser",
@@ -1138,16 +1183,22 @@ mod tests {
                         }
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
         // Mock the albums endpoint
-        let _mock_albums = server.mock("GET", "/api/v2/user/testuser!albums")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_albums = server
+            .mock("GET", "/api/v2/user/testuser!albums")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Album": [
                         {
@@ -1159,7 +1210,8 @@ mod tests {
                         }
                     ]
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
@@ -1171,12 +1223,17 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Album": {
                         "AlbumKey": "ABC123",
@@ -1186,7 +1243,8 @@ mod tests {
                         "Uri": "/api/v2/album/ABC123"
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
     }
@@ -1198,11 +1256,16 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         // Mock authuser endpoint
-        let _mock_auth = server.mock("GET", "/api/v2!authuser")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_auth = server
+            .mock("GET", "/api/v2!authuser")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "User": {
                         "Uri": "/api/v2/user/testuser",
@@ -1214,17 +1277,23 @@ mod tests {
                         }
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
         // Mock create node endpoint
-        let _mock_create = server.mock("POST", "/api/v2/node/ROOT!children")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_create = server
+            .mock("POST", "/api/v2/node/ROOT!children")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("content-type", "application/json")
             .with_status(201)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Node": {
                         "Uris": {
@@ -1234,16 +1303,22 @@ mod tests {
                         }
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
         // Mock get album endpoint
-        let _mock_album = server.mock("GET", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_album = server
+            .mock("GET", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Album": {
                         "AlbumKey": "ABC123",
@@ -1253,22 +1328,29 @@ mod tests {
                         "Uri": "/api/v2/album/ABC123"
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
         // Mock node details endpoint
-        let _mock_node = server.mock("GET", "/api/v2/node/NODE123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_node = server
+            .mock("GET", "/api/v2/node/NODE123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Node": {
                         "UrlPath": "/new-album"
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
     }
@@ -1280,17 +1362,23 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         // Mock node endpoint that has no children
-        let _mock = server.mock("GET", "/api/v2/node/PARENT")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/node/PARENT")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Node": {
                         "HasChildren": false
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
     }
@@ -1302,11 +1390,16 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         // Mock parent node endpoint
-        let _mock_node = server.mock("GET", "/api/v2/node/PARENT")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_node = server
+            .mock("GET", "/api/v2/node/PARENT")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Node": {
                         "HasChildren": true,
@@ -1317,16 +1410,22 @@ mod tests {
                         }
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
         // Mock children endpoint
-        let _mock_children = server.mock("GET", "/api/v2/node/PARENT!children")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock_children = server
+            .mock("GET", "/api/v2/node/PARENT!children")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Node": [
                         {
@@ -1343,7 +1442,8 @@ mod tests {
                         }
                     ]
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
     }
@@ -1370,8 +1470,12 @@ mod tests {
         let client = create_test_client();
         let mut server = mockito::Server::new_async().await;
 
-        let _mock = server.mock("DELETE", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1390,8 +1494,12 @@ mod tests {
         let client = create_test_client();
         let mut server = mockito::Server::new_async().await;
 
-        let _mock = server.mock("DELETE", "/api/v2/album/NOTFOUND")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/album/NOTFOUND")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(404)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Response": {"Code": 404, "Message": "Album not found"}}"#)
@@ -1407,8 +1515,12 @@ mod tests {
         let client = create_test_client();
         let mut server = mockito::Server::new_async().await;
 
-        let _mock = server.mock("DELETE", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(403)
             .with_header("content-type", "application/json")
             .with_body(r#"{"Response": {"Code": 403, "Message": "Forbidden"}}"#)
@@ -1424,8 +1536,12 @@ mod tests {
         let client = create_test_client();
         let mut server = mockito::Server::new_async().await;
 
-        let _mock = server.mock("DELETE", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -1482,8 +1598,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .match_header("content-type", "application/json")
             .with_status(200)
@@ -1521,12 +1641,16 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .match_header("content-type", "application/json")
             .match_body(mockito::Matcher::JsonString(
-                r#"{"Privacy":"Private"}"#.to_string()
+                r#"{"Privacy":"Private"}"#.to_string(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1542,8 +1666,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/album/NOTFOUND")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/album/NOTFOUND")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(404)
             .with_body("Album not found")
             .create_async()
@@ -1558,8 +1686,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -1574,8 +1706,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/album/ABC123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/album/ABC123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(403)
             .with_body("Forbidden - insufficient permissions")
             .create_async()

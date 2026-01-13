@@ -1,5 +1,5 @@
-use clap::{Parser, Subcommand};
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use colored::*;
 
 #[derive(Debug, Clone)]
@@ -9,14 +9,19 @@ enum UploadMode {
 }
 
 fn print_logo() {
-    println!("{}", r#"
+    println!(
+        "{}",
+        r#"
  ____                        __  __              ____ _     ___
 / ___| _ __ ___  _   _  ___ |  \/  |_   _  __ _ / ___| |   |_ _|
 \___ \| '_ ` _ \| | | |/ _ `| |\/| | | | |/ _` | |   | |    | |
  ___) | | | | | | |_| | (_| | |  | | |_| | (_| | |___| |___ | |
 |____/|_| |_| |_|\__,_|\__, |_|  |_|\__,_|\__, |\____|_____|___|
                        |___/              |___/
-    "#.bright_cyan().bold());
+    "#
+        .bright_cyan()
+        .bold()
+    );
 }
 
 // Helper functions for consistent colored output
@@ -92,6 +97,21 @@ fn format_size(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} bytes", bytes)
+    }
+}
+
+/// Format duration in seconds into a human-readable string
+fn format_duration(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+
+    if hours > 0 {
+        format!("{}h {}m {}s", hours, minutes, secs)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, secs)
+    } else {
+        format!("{}s", secs)
     }
 }
 
@@ -186,6 +206,10 @@ enum AlbumCommands {
     Create {
         /// Album name
         name: String,
+
+        /// Privacy level (private, unlisted, public) - defaults to private
+        #[arg(long, default_value = "private")]
+        privacy: String,
     },
 
     /// Delete an album
@@ -376,6 +400,26 @@ async fn main() -> Result<()> {
     print_logo();
     let cli = Cli::parse();
 
+    // Check if auth is configured for commands that require it
+    if !matches!(cli.command, Commands::Init) && !config::is_auth_configured() {
+        println!("\n{}", warning("Authentication not configured!"));
+        println!(
+            "\n{}",
+            info("To get started, you'll need to set up your SmugMug API credentials.")
+        );
+        println!("\n{}", highlight("Run the following command to configure:"));
+        println!("  {}\n", "smugmug-cli init".bright_white().bold());
+
+        println!("{}", info("You'll need:"));
+        println!(
+            "  • API Key and Secret from {}",
+            "https://api.smugmug.com/api/developer/apply".bright_cyan()
+        );
+        println!("  • Access Token and Secret from your SmugMug Account Settings\n");
+
+        return Ok(());
+    }
+
     match cli.command {
         Commands::Init => {
             println!("Initializing SmugMug CLI...");
@@ -407,14 +451,20 @@ async fn main() -> Result<()> {
                                 println!("{}", serde_json::to_string_pretty(&features)?);
                             }
                             Err(e) => {
-                                println!("\n{}", error(&format!("Failed to fetch features: {}", e)));
+                                println!(
+                                    "\n{}",
+                                    error(&format!("Failed to fetch features: {}", e))
+                                );
                             }
                         }
                     }
                 }
                 Err(e) => {
                     println!("\n{}", error(&format!("Authentication failed: {}", e)));
-                    println!("\n{}", warning("Please check your credentials and run 'smugmug-cli init' again."));
+                    println!(
+                        "\n{}",
+                        warning("Please check your credentials and run 'smugmug-cli init' again.")
+                    );
                 }
             }
         }
@@ -445,12 +495,32 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                AlbumCommands::Create { name } => {
-                    println!("Creating album: {}", name);
-                    match client.create_album(&name, None).await {
+                AlbumCommands::Create { name, privacy } => {
+                    // Validate and normalize privacy value
+                    let normalized_privacy = match privacy.to_lowercase().as_str() {
+                        "public" => "Public",
+                        "unlisted" => "Unlisted",
+                        "private" => "Private",
+                        _ => {
+                            println!(
+                                "\n{}",
+                                error(&format!("Invalid privacy value: {}", privacy))
+                            );
+                            println!("  Valid values: public, unlisted, private");
+                            return Ok(());
+                        }
+                    };
+
+                    println!(
+                        "Creating album: {} ({})",
+                        name,
+                        normalized_privacy.to_lowercase()
+                    );
+                    match client.create_album(&name, None, normalized_privacy).await {
                         Ok(album) => {
-                            println!("\n✓ Album created successfully!");
+                            println!("\n{}", success("Album created successfully!"));
                             println!("  Name: {}", album.name);
+                            println!("  Privacy: {}", normalized_privacy);
                             println!("  Key: {}", album.album_key);
                             println!("  URL Name: {}", album.url_name);
                             println!("  Node ID: {}", album.node_id);
@@ -459,7 +529,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            println!("\n✗ Failed to create album: {}", e);
+                            println!("\n{}", error(&format!("Failed to create album: {}", e)));
                         }
                     }
                 }
@@ -469,7 +539,10 @@ async fn main() -> Result<()> {
                     // Try to find album by name or use as key
                     let (album_key, album_info) = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 (found.album_key.clone(), Some(found.clone()))
                             } else {
                                 // Album not found by name, try using the input as key directly
@@ -520,7 +593,11 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                AlbumCommands::Download { album, output, threads } => {
+                AlbumCommands::Download {
+                    album,
+                    output,
+                    threads,
+                } => {
                     println!("Downloading album: {}", album);
                     println!("Output directory: {}", output);
                     println!("Threads: {}\n", threads);
@@ -528,7 +605,10 @@ async fn main() -> Result<()> {
                     // Try to find album by name or use as key
                     let album_key = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("✗ Album not found: {}", album);
@@ -554,7 +634,10 @@ async fn main() -> Result<()> {
                             println!("  Total images: {}", stats.total_images);
                             println!("  Downloaded: {}", stats.downloaded);
                             println!("  Failed: {}", stats.failed);
-                            println!("  Total size: {:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0);
+                            println!(
+                                "  Total size: {:.2} MB",
+                                stats.total_bytes as f64 / 1024.0 / 1024.0
+                            );
                         }
                         Err(e) => {
                             println!("\n✗ Download failed: {}", e);
@@ -572,13 +655,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                AlbumCommands::Settings { album, privacy, description, keywords, sort_method, sort_direction } => {
+                AlbumCommands::Settings {
+                    album,
+                    privacy,
+                    description,
+                    keywords,
+                    sort_method,
+                    sort_direction,
+                } => {
                     println!("Looking up album: {}", album);
 
                     // Try to find album by name or use as key
                     let (album_key, album_info) = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 (found.album_key.clone(), Some(found.clone()))
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -593,7 +686,12 @@ async fn main() -> Result<()> {
                     };
 
                     // Check if any settings were provided
-                    if privacy.is_none() && description.is_none() && keywords.is_none() && sort_method.is_none() && sort_direction.is_none() {
+                    if privacy.is_none()
+                        && description.is_none()
+                        && keywords.is_none()
+                        && sort_method.is_none()
+                        && sort_direction.is_none()
+                    {
                         println!("\n✗ No settings specified to update");
                         println!("  Use --privacy, --description, --keywords, --sort-method, or --sort-direction");
                         return Ok(());
@@ -684,7 +782,10 @@ async fn main() -> Result<()> {
                     // Try to find album by name or use as key
                     let album_key = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -727,7 +828,10 @@ async fn main() -> Result<()> {
                                     println!("  Status URI: {}", uri);
                                 }
                                 println!("\nTo wait for completion, use:");
-                                println!("  smugmug-cli albums get-download-link \"{}\" --wait", album);
+                                println!(
+                                    "  smugmug-cli albums get-download-link \"{}\" --wait",
+                                    album
+                                );
                             }
                             Err(e) => {
                                 println!("\n✗ Failed to request download: {}", e);
@@ -753,7 +857,10 @@ async fn main() -> Result<()> {
                     // Try to find album by name or use as key
                     let album_key = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -800,7 +907,10 @@ async fn main() -> Result<()> {
                     // Try to find album by name or use as key
                     let album_key_resolved = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -817,9 +927,7 @@ async fn main() -> Result<()> {
                     // Verify the image exists in the album
                     println!("Verifying image exists in album...");
                     let image_exists = match client.list_album_images(&album_key_resolved).await {
-                        Ok(images) => {
-                            images.iter().any(|img| img.image_key == image_key)
-                        }
+                        Ok(images) => images.iter().any(|img| img.image_key == image_key),
                         Err(e) => {
                             println!("\n✗ Failed to verify image: {}", e);
                             return Ok(());
@@ -828,7 +936,10 @@ async fn main() -> Result<()> {
 
                     if !image_exists {
                         println!("\n✗ Image not found in album: {}", image_key);
-                        println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                        println!(
+                            "  Use 'smugmug-cli images list {}' to see available images",
+                            album
+                        );
                         return Ok(());
                     }
 
@@ -845,9 +956,18 @@ async fn main() -> Result<()> {
                             println!();
 
                             println!("Metadata:");
-                            println!("  Title:         {}", details.title.as_deref().unwrap_or("N/A"));
-                            println!("  Caption:       {}", details.caption.as_deref().unwrap_or("N/A"));
-                            println!("  Keywords:      {}", details.keywords.as_deref().unwrap_or("N/A"));
+                            println!(
+                                "  Title:         {}",
+                                details.title.as_deref().unwrap_or("N/A")
+                            );
+                            println!(
+                                "  Caption:       {}",
+                                details.caption.as_deref().unwrap_or("N/A")
+                            );
+                            println!(
+                                "  Keywords:      {}",
+                                details.keywords.as_deref().unwrap_or("N/A")
+                            );
                             println!();
 
                             println!("Location:");
@@ -870,8 +990,14 @@ async fn main() -> Result<()> {
 
                             println!("Technical:");
                             println!("  Archived URI:  {}", details.archived_uri);
-                            println!("  Archived MD5:  {}", details.archived_md5.as_deref().unwrap_or("N/A"));
-                            println!("  Upload Key:    {}", details.upload_key.as_deref().unwrap_or("N/A"));
+                            println!(
+                                "  Archived MD5:  {}",
+                                details.archived_md5.as_deref().unwrap_or("N/A")
+                            );
+                            println!(
+                                "  Upload Key:    {}",
+                                details.upload_key.as_deref().unwrap_or("N/A")
+                            );
                             println!("  API URI:       {}", details.uri);
                             if let Some(web_uri) = &details.web_uri {
                                 println!("  Web URL:       {}", web_uri);
@@ -882,13 +1008,20 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                ImageCommands::Delete { album, image_key, force } => {
+                ImageCommands::Delete {
+                    album,
+                    image_key,
+                    force,
+                } => {
                     println!("Looking up album: {}", album);
 
                     // Try to find album by name or use as key
                     let album_key_resolved = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -906,11 +1039,16 @@ async fn main() -> Result<()> {
                     println!("Verifying image exists...");
                     let image_info = match client.list_album_images(&album_key_resolved).await {
                         Ok(images) => {
-                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                            if let Some(found) =
+                                images.iter().find(|img| img.image_key == image_key)
+                            {
                                 found.clone()
                             } else {
                                 println!("\n✗ Image not found in album: {}", image_key);
-                                println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                                println!(
+                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    album
+                                );
                                 return Ok(());
                             }
                         }
@@ -951,13 +1089,24 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                ImageCommands::Update { album, image_key, caption, title, keywords, latitude, longitude } => {
+                ImageCommands::Update {
+                    album,
+                    image_key,
+                    caption,
+                    title,
+                    keywords,
+                    latitude,
+                    longitude,
+                } => {
                     println!("Looking up album: {}", album);
 
                     // Try to find album by name or use as key
                     let album_key_resolved = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -975,11 +1124,16 @@ async fn main() -> Result<()> {
                     println!("Verifying image exists...");
                     let image_info = match client.list_album_images(&album_key_resolved).await {
                         Ok(images) => {
-                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                            if let Some(found) =
+                                images.iter().find(|img| img.image_key == image_key)
+                            {
                                 found.clone()
                             } else {
                                 println!("\n✗ Image not found in album: {}", image_key);
-                                println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                                println!(
+                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    album
+                                );
                                 return Ok(());
                             }
                         }
@@ -990,9 +1144,16 @@ async fn main() -> Result<()> {
                     };
 
                     // Check if any updates were provided
-                    if caption.is_none() && title.is_none() && keywords.is_none() && latitude.is_none() && longitude.is_none() {
+                    if caption.is_none()
+                        && title.is_none()
+                        && keywords.is_none()
+                        && latitude.is_none()
+                        && longitude.is_none()
+                    {
                         println!("\n✗ No metadata fields specified to update");
-                        println!("  Use --caption, --title, --keywords, --latitude, or --longitude");
+                        println!(
+                            "  Use --caption, --title, --keywords, --latitude, or --longitude"
+                        );
                         return Ok(());
                     }
 
@@ -1040,13 +1201,21 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                ImageCommands::Move { source_album, image_key, target_album, force } => {
+                ImageCommands::Move {
+                    source_album,
+                    image_key,
+                    target_album,
+                    force,
+                } => {
                     println!("Looking up source album: {}", source_album);
 
                     // Try to find source album by name or use as key
                     let (source_album_key, source_album_name) = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == source_album || a.album_key == source_album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == source_album || a.album_key == source_album)
+                            {
                                 (found.album_key.clone(), found.name.clone())
                             } else {
                                 println!("\n✗ Source album not found: {}", source_album);
@@ -1064,11 +1233,16 @@ async fn main() -> Result<()> {
                     println!("Verifying image exists in source album...");
                     let image_info = match client.list_album_images(&source_album_key).await {
                         Ok(images) => {
-                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                            if let Some(found) =
+                                images.iter().find(|img| img.image_key == image_key)
+                            {
                                 found.clone()
                             } else {
                                 println!("\n✗ Image not found in source album: {}", image_key);
-                                println!("  Use 'smugmug-cli images list {}' to see available images", source_album);
+                                println!(
+                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    source_album
+                                );
                                 return Ok(());
                             }
                         }
@@ -1082,7 +1256,10 @@ async fn main() -> Result<()> {
                     println!("Looking up target album: {}", target_album);
                     let (target_album_key, target_album_name) = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == target_album || a.album_key == target_album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == target_album || a.album_key == target_album)
+                            {
                                 (found.album_key.clone(), found.name.clone())
                             } else {
                                 println!("\n✗ Target album not found: {}", target_album);
@@ -1155,7 +1332,10 @@ async fn main() -> Result<()> {
                     // Try to find album by name or use as key
                     let album_key_resolved = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -1172,9 +1352,7 @@ async fn main() -> Result<()> {
                     // Verify the image exists in the album
                     println!("Verifying image exists...");
                     let image_exists = match client.list_album_images(&album_key_resolved).await {
-                        Ok(images) => {
-                            images.iter().any(|img| img.image_key == image_key)
-                        }
+                        Ok(images) => images.iter().any(|img| img.image_key == image_key),
                         Err(e) => {
                             println!("\n✗ Failed to verify image: {}", e);
                             return Ok(());
@@ -1183,7 +1361,10 @@ async fn main() -> Result<()> {
 
                     if !image_exists {
                         println!("\n✗ Image not found in album: {}", image_key);
-                        println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                        println!(
+                            "  Use 'smugmug-cli images list {}' to see available images",
+                            album
+                        );
                         return Ok(());
                     }
 
@@ -1194,7 +1375,11 @@ async fn main() -> Result<()> {
                             if comments.is_empty() {
                                 println!("No comments found for this image.");
                             } else {
-                                println!("✓ Found {} comments for image {}:\n", format_number(comments.len()), image_key);
+                                println!(
+                                    "✓ Found {} comments for image {}:\n",
+                                    format_number(comments.len()),
+                                    image_key
+                                );
                                 for comment in comments {
                                     if let Some(key) = &comment.comment_key {
                                         println!("  Comment Key: {}", key);
@@ -1205,7 +1390,8 @@ async fn main() -> Result<()> {
                                         println!("  Author:      Anonymous");
                                     }
                                     if let Some(rating) = comment.rating {
-                                        let stars = "★".repeat(rating as usize) + &"☆".repeat((5 - rating) as usize);
+                                        let stars = "★".repeat(rating as usize)
+                                            + &"☆".repeat((5 - rating) as usize);
                                         println!("  Rating:      {} ({}/5)", stars, rating);
                                     }
                                     println!("  Text:        {}", comment.text);
@@ -1221,13 +1407,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                CommentCommands::Create { album, image_key, text, name, email, rating } => {
+                CommentCommands::Create {
+                    album,
+                    image_key,
+                    text,
+                    name,
+                    email,
+                    rating,
+                } => {
                     println!("Looking up album: {}", album);
 
                     // Try to find album by name or use as key
                     let album_key_resolved = match client.list_albums().await {
                         Ok(albums) => {
-                            if let Some(found) = albums.iter().find(|a| a.name == album || a.album_key == album) {
+                            if let Some(found) = albums
+                                .iter()
+                                .find(|a| a.name == album || a.album_key == album)
+                            {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
@@ -1245,11 +1441,16 @@ async fn main() -> Result<()> {
                     println!("Verifying image exists...");
                     let image_info = match client.list_album_images(&album_key_resolved).await {
                         Ok(images) => {
-                            if let Some(found) = images.iter().find(|img| img.image_key == image_key) {
+                            if let Some(found) =
+                                images.iter().find(|img| img.image_key == image_key)
+                            {
                                 found.clone()
                             } else {
                                 println!("\n✗ Image not found in album: {}", image_key);
-                                println!("  Use 'smugmug-cli images list {}' to see available images", album);
+                                println!(
+                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    album
+                                );
                                 return Ok(());
                             }
                         }
@@ -1304,7 +1505,15 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Upload { path, threads, album, parent, dry_run, check_remote, no_cache } => {
+        Commands::Upload {
+            path,
+            threads,
+            album,
+            parent,
+            dry_run,
+            check_remote,
+            no_cache,
+        } => {
             let cfg = config::load_config()?;
             let client = std::sync::Arc::new(api::SmugMugClient::new(
                 cfg.auth.api_key,
@@ -1319,7 +1528,7 @@ async fn main() -> Result<()> {
                 (UploadMode::SingleAlbum, name)
             } else {
                 // No album specified, prompt user
-                use dialoguer::{Select, Input};
+                use dialoguer::{Input, Select};
 
                 println!("\nNo album specified. How would you like to upload?");
                 let choices = vec![
@@ -1327,10 +1536,7 @@ async fn main() -> Result<()> {
                     "Maintain folder structure - create albums/folders matching your directory structure",
                 ];
 
-                let selection = Select::new()
-                    .items(&choices)
-                    .default(0)
-                    .interact()?;
+                let selection = Select::new().items(&choices).default(0).interact()?;
 
                 match selection {
                     0 => {
@@ -1370,7 +1576,9 @@ async fn main() -> Result<()> {
             }
 
             // Get cache directory (used by both upload modes)
-            let cache_path = if let Some(proj_dirs) = directories::ProjectDirs::from("com", "smugmug-cli", "smugmug-cli") {
+            let cache_path = if let Some(proj_dirs) =
+                directories::ProjectDirs::from("com", "smugmug-cli", "smugmug-cli")
+            {
                 proj_dirs.cache_dir().to_path_buf()
             } else {
                 std::path::PathBuf::from(".cache")
@@ -1405,7 +1613,10 @@ async fn main() -> Result<()> {
                         // Parent specified, check if album exists in that folder first
                         match client.find_album_in_folder(parent_uri, &album_name).await {
                             Ok(Some(existing_album)) => {
-                                println!("✓ Found existing album: {} (Key: {})", existing_album.name, existing_album.album_key);
+                                println!(
+                                    "✓ Found existing album: {} (Key: {})",
+                                    existing_album.name, existing_album.album_key
+                                );
                                 if let Some(ref web_uri) = existing_album.web_uri {
                                     println!("  URL: {}", web_uri);
                                 }
@@ -1413,10 +1624,16 @@ async fn main() -> Result<()> {
                                 existing_album
                             }
                             Ok(None) => {
-                                // Album doesn't exist, create it
-                                match client.create_album(&album_name, Some(parent_uri)).await {
+                                // Album doesn't exist, create it (private by default)
+                                match client
+                                    .create_album(&album_name, Some(parent_uri), "Private")
+                                    .await
+                                {
                                     Ok(album) => {
-                                        println!("✓ Created album: {} (Key: {})", album.name, album.album_key);
+                                        println!(
+                                            "✓ Created album: {} (Key: {}) [Private]",
+                                            album.name, album.album_key
+                                        );
                                         if let Some(ref web_uri) = album.web_uri {
                                             println!("  URL: {}", web_uri);
                                         }
@@ -1438,7 +1655,10 @@ async fn main() -> Result<()> {
                         // No parent specified, use root and check for existing
                         match client.get_or_create_album(&album_name).await {
                             Ok(album) => {
-                                println!("✓ Using album: {} (Key: {})", album.name, album.album_key);
+                                println!(
+                                    "✓ Using album: {} (Key: {})",
+                                    album.name, album.album_key
+                                );
                                 if let Some(ref web_uri) = album.web_uri {
                                     println!("  URL: {}", web_uri);
                                 }
@@ -1470,11 +1690,31 @@ async fn main() -> Result<()> {
                     match uploader::upload_files(upload_options).await {
                         Ok(stats) => {
                             println!("\n{}", success("Upload complete!"));
-                            println!("  {}: {}", info("Total files"), highlight(&stats.total_files.to_string()));
-                            println!("  {}: {}", "Uploaded".green(), highlight(&stats.uploaded.to_string()));
+                            println!(
+                                "  {}: {}",
+                                info("Total files"),
+                                highlight(&stats.total_files.to_string())
+                            );
+                            println!(
+                                "  {}: {}",
+                                "Uploaded".green(),
+                                highlight(&stats.uploaded.to_string())
+                            );
                             println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
                             println!("  {}: {}", "Failed".red(), stats.failed);
-                            println!("  {}: {}", info("Total size"), highlight(&format!("{:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0)));
+                            println!(
+                                "  {}: {}",
+                                info("Total size"),
+                                highlight(&format!(
+                                    "{:.2} MB",
+                                    stats.total_bytes as f64 / 1024.0 / 1024.0
+                                ))
+                            );
+                            println!(
+                                "  {}: {}",
+                                info("Duration"),
+                                highlight(&format_duration(stats.duration_secs))
+                            );
                         }
                         Err(e) => {
                             println!("\n{}", error(&format!("Upload failed: {}", e)));
@@ -1492,16 +1732,46 @@ async fn main() -> Result<()> {
                         cache_path,
                         retry_attempts: cfg.upload.retry_attempts,
                         has_smugmug_source: cfg.upload.has_smugmug_source,
-                    }).await {
+                    })
+                    .await
+                    {
                         Ok(stats) => {
                             println!("\n{}", success("Upload complete!"));
-                            println!("  {}: {}", info("Total files"), highlight(&stats.total_files.to_string()));
-                            println!("  {}: {}", "Uploaded".green(), highlight(&stats.uploaded.to_string()));
+                            println!(
+                                "  {}: {}",
+                                info("Total files"),
+                                highlight(&stats.total_files.to_string())
+                            );
+                            println!(
+                                "  {}: {}",
+                                "Uploaded".green(),
+                                highlight(&stats.uploaded.to_string())
+                            );
                             println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
                             println!("  {}: {}", "Failed".red(), stats.failed);
-                            println!("  {}: {}", info("Folders created"), highlight(&stats.folders_created.to_string()));
-                            println!("  {}: {}", info("Albums created"), highlight(&stats.albums_created.to_string()));
-                            println!("  {}: {}", info("Total size"), highlight(&format!("{:.2} MB", stats.total_bytes as f64 / 1024.0 / 1024.0)));
+                            println!(
+                                "  {}: {}",
+                                info("Folders created"),
+                                highlight(&stats.folders_created.to_string())
+                            );
+                            println!(
+                                "  {}: {}",
+                                info("Albums created"),
+                                highlight(&stats.albums_created.to_string())
+                            );
+                            println!(
+                                "  {}: {}",
+                                info("Total size"),
+                                highlight(&format!(
+                                    "{:.2} MB",
+                                    stats.total_bytes as f64 / 1024.0 / 1024.0
+                                ))
+                            );
+                            println!(
+                                "  {}: {}",
+                                info("Duration"),
+                                highlight(&format_duration(stats.duration_secs))
+                            );
                         }
                         Err(e) => {
                             println!("\n{}", error(&format!("Upload failed: {}", e)));
@@ -1517,42 +1787,38 @@ async fn main() -> Result<()> {
             println!("  Location: {}", cache_path.display());
 
             match cache::HashStore::new(cache_path.to_str().unwrap()) {
-                Ok(store) => {
-                    match store.stats() {
-                        Ok(stats) => {
-                            println!("  Total entries: {}", format_number(stats.total_entries));
-                            println!("  Cache size: {}", format_size(stats.total_size));
+                Ok(store) => match store.stats() {
+                    Ok(stats) => {
+                        println!("  Total entries: {}", format_number(stats.total_entries));
+                        println!("  Cache size: {}", format_size(stats.total_size));
 
-                            if let Some(oldest) = stats.oldest_entry {
-                                println!("  Oldest entry: {}", oldest.format("%Y-%m-%d"));
-                            } else {
-                                println!("  Oldest entry: N/A");
-                            }
-
-                            if let Some(newest) = stats.newest_entry {
-                                println!("  Newest entry: {}", newest.format("%Y-%m-%d"));
-                            } else {
-                                println!("  Newest entry: N/A");
-                            }
+                        if let Some(oldest) = stats.oldest_entry {
+                            println!("  Oldest entry: {}", oldest.format("%Y-%m-%d"));
+                        } else {
+                            println!("  Oldest entry: N/A");
                         }
-                        Err(e) => {
-                            println!("  Error retrieving stats: {}", e);
+
+                        if let Some(newest) = stats.newest_entry {
+                            println!("  Newest entry: {}", newest.format("%Y-%m-%d"));
+                        } else {
+                            println!("  Newest entry: N/A");
                         }
                     }
-                }
+                    Err(e) => {
+                        println!("  Error retrieving stats: {}", e);
+                    }
+                },
                 Err(e) => {
                     println!("  Error opening cache: {}", e);
                 }
             }
         }
-        Commands::Cache { command } => {
-            match command {
-                CacheCommands::Clear => {
-                    println!("Clearing cache...");
-                    cache::clear_cache()?;
-                }
+        Commands::Cache { command } => match command {
+            CacheCommands::Clear => {
+                println!("Clearing cache...");
+                cache::clear_cache()?;
             }
-        }
+        },
     }
 
     Ok(())
@@ -1619,7 +1885,10 @@ mod tests {
     fn test_format_size_gb() {
         assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GB");
         assert_eq!(format_size(1024u64 * 1024 * 1024 * 5), "5.00 GB");
-        assert_eq!(format_size(1024u64 * 1024 * 1024 + 512 * 1024 * 1024), "1.50 GB");
+        assert_eq!(
+            format_size(1024u64 * 1024 * 1024 + 512 * 1024 * 1024),
+            "1.50 GB"
+        );
     }
 
     #[test]
@@ -1628,5 +1897,28 @@ mod tests {
         assert_eq!(format_size(1536), "1.50 KB");
         assert_eq!(format_size(1587), "1.55 KB");
         assert_eq!(format_size(1024 + 10), "1.01 KB");
+    }
+
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(1), "1s");
+        assert_eq!(format_duration(30), "30s");
+        assert_eq!(format_duration(59), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes() {
+        assert_eq!(format_duration(60), "1m 0s");
+        assert_eq!(format_duration(90), "1m 30s");
+        assert_eq!(format_duration(3599), "59m 59s");
+    }
+
+    #[test]
+    fn test_format_duration_hours() {
+        assert_eq!(format_duration(3600), "1h 0m 0s");
+        assert_eq!(format_duration(3661), "1h 1m 1s");
+        assert_eq!(format_duration(7200), "2h 0m 0s");
+        assert_eq!(format_duration(7265), "2h 1m 5s");
     }
 }

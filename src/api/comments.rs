@@ -92,7 +92,8 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
+        let response = self
+            .client
             .get(&comments_url)
             .headers(headers)
             .send()
@@ -172,10 +173,15 @@ mod tests {
         let mut server = Server::new_async().await;
         let api_url = server.url();
 
-        let _mock = server.mock("GET", "/api/v2/image/IMG123!comments")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/image/IMG123!comments")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Comment": [
                         {
@@ -187,7 +193,8 @@ mod tests {
                         }
                     ]
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
@@ -200,7 +207,8 @@ mod tests {
 
         // Note: This test won't actually call the mock server because the URL is hardcoded
         // in the implementation. We're primarily testing the struct deserialization here.
-        let result = serde_json::from_str::<CommentsResponse>(r#"{
+        let result = serde_json::from_str::<CommentsResponse>(
+            r#"{
             "Response": {
                 "Comment": [
                     {
@@ -212,7 +220,8 @@ mod tests {
                     }
                 ]
             }
-        }"#);
+        }"#,
+        );
 
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -261,7 +270,10 @@ mod tests {
 
         let result = client.create_image_comment("IMG123", request).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("60,000 characters"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("60,000 characters"));
     }
 
     #[tokio::test]

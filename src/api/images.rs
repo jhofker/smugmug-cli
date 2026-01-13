@@ -94,21 +94,14 @@ pub struct ImageMetadataUpdate {
 
 impl SmugMugClient {
     pub async fn list_album_images(&self, album_key: &str) -> Result<Vec<AlbumImage>> {
-        let images_url = format!(
-            "https://api.smugmug.com/api/v2/album/{}!images",
-            album_key
-        );
+        let images_url = format!("https://api.smugmug.com/api/v2/album/{}!images", album_key);
         let oauth_header = self.build_oauth_header("GET", &images_url);
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&images_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&images_url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -122,21 +115,14 @@ impl SmugMugClient {
     }
 
     pub async fn get_image_details(&self, image_key: &str) -> Result<ImageDetails> {
-        let image_url = format!(
-            "https://api.smugmug.com/api/v2/image/{}",
-            image_key
-        );
+        let image_url = format!("https://api.smugmug.com/api/v2/image/{}", image_key);
         let oauth_header = self.build_oauth_header("GET", &image_url);
 
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self.client
-            .get(&image_url)
-            .headers(headers)
-            .send()
-            .await?;
+        let response = self.client.get(&image_url).headers(headers).send().await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -150,10 +136,7 @@ impl SmugMugClient {
     }
 
     pub async fn delete_image(&self, image_key: &str) -> Result<()> {
-        let delete_url = format!(
-            "https://api.smugmug.com/api/v2/image/{}",
-            image_key
-        );
+        let delete_url = format!("https://api.smugmug.com/api/v2/image/{}", image_key);
         let response = self.delete_with_auth(&delete_url).await?;
 
         let status = response.status();
@@ -166,11 +149,12 @@ impl SmugMugClient {
         Ok(())
     }
 
-    pub async fn update_image_metadata(&self, image_key: &str, metadata: ImageMetadataUpdate) -> Result<()> {
-        let update_url = format!(
-            "https://api.smugmug.com/api/v2/image/{}",
-            image_key
-        );
+    pub async fn update_image_metadata(
+        &self,
+        image_key: &str,
+        metadata: ImageMetadataUpdate,
+    ) -> Result<()> {
+        let update_url = format!("https://api.smugmug.com/api/v2/image/{}", image_key);
 
         // Build JSON body with only provided fields
         let mut body = json!({});
@@ -201,17 +185,18 @@ impl SmugMugClient {
         let body_text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!("Failed to update image metadata: {} - {}", status, body_text);
+            anyhow::bail!(
+                "Failed to update image metadata: {} - {}",
+                status,
+                body_text
+            );
         }
 
         Ok(())
     }
 
     pub async fn move_image(&self, image_key: &str, target_album_key: &str) -> Result<()> {
-        let move_url = format!(
-            "https://api.smugmug.com/api/v2/image/{}",
-            image_key
-        );
+        let move_url = format!("https://api.smugmug.com/api/v2/image/{}", image_key);
 
         // Build JSON body with album URI
         let album_uri = format!("/api/v2/album/{}", target_album_key);
@@ -309,12 +294,17 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/album/ABC123!images")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/album/ABC123!images")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "AlbumImage": [
                         {
@@ -337,7 +327,8 @@ mod tests {
                         }
                     ]
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
@@ -349,15 +340,21 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/album/EMPTY!images")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/album/EMPTY!images")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "AlbumImage": []
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
     }
@@ -367,8 +364,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/album/INVALID!images")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/album/INVALID!images")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(404)
             .with_body("Album not found")
             .create_async()
@@ -421,8 +422,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("DELETE", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -438,8 +443,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("DELETE", "/api/v2/image/INVALID")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/image/INVALID")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(404)
             .with_body("Image not found")
             .create_async()
@@ -454,8 +463,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("DELETE", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -470,8 +483,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("DELETE", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("DELETE", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(403)
             .with_body("Forbidden - insufficient permissions")
             .create_async()
@@ -534,7 +551,10 @@ mod tests {
         assert_eq!(details.format, "JPG");
         assert_eq!(details.file_size, 2048000);
         assert_eq!(details.title, Some("Beach Sunset".to_string()));
-        assert_eq!(details.caption, Some("Beautiful sunset at the beach".to_string()));
+        assert_eq!(
+            details.caption,
+            Some("Beautiful sunset at the beach".to_string())
+        );
         assert_eq!(details.keywords, Some("sunset,beach,vacation".to_string()));
         assert_eq!(details.latitude, Some(37.7749));
         assert_eq!(details.longitude, Some(-122.4194));
@@ -543,7 +563,10 @@ mod tests {
         assert_eq!(details.archived_md5, Some("def456abc789".to_string()));
         assert_eq!(details.upload_key, Some("UPLOAD123".to_string()));
         assert_eq!(details.uri, "/api/v2/image/IMG789");
-        assert_eq!(details.web_uri, Some("https://smugmug.com/image/IMG789".to_string()));
+        assert_eq!(
+            details.web_uri,
+            Some("https://smugmug.com/image/IMG789".to_string())
+        );
     }
 
     #[test]
@@ -592,7 +615,10 @@ mod tests {
         let response: ImageDetailsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.response.image.image_key, "IMG777");
         assert_eq!(response.response.image.file_name, "test.jpg");
-        assert_eq!(response.response.image.title, Some("Test Image".to_string()));
+        assert_eq!(
+            response.response.image.title,
+            Some("Test Image".to_string())
+        );
     }
 
     #[tokio::test]
@@ -600,12 +626,17 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/image/IMG888")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/image/IMG888")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{
+            .with_body(
+                r#"{
                 "Response": {
                     "Image": {
                         "ImageKey": "IMG888",
@@ -625,7 +656,8 @@ mod tests {
                         "WebUri": "https://smugmug.com/image/IMG888"
                     }
                 }
-            }"#)
+            }"#,
+            )
             .create_async()
             .await;
 
@@ -637,8 +669,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/image/NOTFOUND")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/image/NOTFOUND")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(404)
             .with_body("Image not found")
             .create_async()
@@ -653,8 +689,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/image/IMG999")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/image/IMG999")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -669,8 +709,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("GET", "/api/v2/image/IMG999")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("GET", "/api/v2/image/IMG999")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(403)
             .with_body("Forbidden - insufficient permissions")
             .create_async()
@@ -752,8 +796,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .match_header("content-type", "application/json")
             .with_status(200)
@@ -770,8 +818,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/INVALID")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/INVALID")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(404)
             .with_body("Image not found")
             .create_async()
@@ -786,8 +838,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -802,8 +858,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(403)
             .with_body("Forbidden - insufficient permissions")
             .create_async()
@@ -834,7 +894,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(update.keywords, Some("sunset;beach;vacation;2024".to_string()));
+        assert_eq!(
+            update.keywords,
+            Some("sunset;beach;vacation;2024".to_string())
+        );
     }
 
     #[test]
@@ -846,7 +909,10 @@ mod tests {
         };
 
         assert_eq!(update.title, Some("My Amazing Photo".to_string()));
-        assert_eq!(update.caption, Some("This was taken at sunset on the beach.".to_string()));
+        assert_eq!(
+            update.caption,
+            Some("This was taken at sunset on the beach.".to_string())
+        );
         assert!(update.keywords.is_none());
     }
 
@@ -855,14 +921,22 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .match_header("accept", "application/json")
             .match_header("content-type", "application/json")
-            .match_body(mockito::Matcher::JsonString(r#"{"AlbumUri":"/api/v2/album/ALB456"}"#.to_string()))
+            .match_body(mockito::Matcher::JsonString(
+                r#"{"AlbumUri":"/api/v2/album/ALB456"}"#.to_string(),
+            ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"Response":{"Image":{"ImageKey":"IMG123","AlbumUri":"/api/v2/album/ALB456"}}}"#)
+            .with_body(
+                r#"{"Response":{"Image":{"ImageKey":"IMG123","AlbumUri":"/api/v2/album/ALB456"}}}"#,
+            )
             .create_async()
             .await;
 
@@ -875,8 +949,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/INVALID")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/INVALID")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(404)
             .with_body("Image not found")
             .create_async()
@@ -891,8 +969,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(401)
             .with_body("Unauthorized")
             .create_async()
@@ -907,8 +989,12 @@ mod tests {
         let _client = create_test_client();
 
         let mut server = mockito::Server::new_async().await;
-        let _mock = server.mock("PATCH", "/api/v2/image/IMG123")
-            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".to_string()))
+        let _mock = server
+            .mock("PATCH", "/api/v2/image/IMG123")
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("OAuth.*".to_string()),
+            )
             .with_status(403)
             .with_body("Forbidden - insufficient permissions")
             .create_async()

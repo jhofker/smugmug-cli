@@ -59,7 +59,9 @@ pub async fn download_album(options: DownloadOptions) -> Result<DownloadStats> {
     let overall_progress = multi_progress.add(ProgressBar::new(images.len() as u64));
     overall_progress.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
             .unwrap()
             .progress_chars("#>-"),
     );
@@ -292,11 +294,8 @@ mod tests {
             .await;
 
         let temp_dir = TempDir::new().unwrap();
-        let image = create_test_image_with_url(
-            "test.jpg",
-            "key123",
-            &format!("{}/test.jpg", server.url()),
-        );
+        let image =
+            create_test_image_with_url("test.jpg", "key123", &format!("{}/test.jpg", server.url()));
 
         let client = reqwest::Client::new();
         let result = download_image(&client, &image, &temp_dir.path().to_path_buf()).await;
@@ -403,11 +402,8 @@ mod tests {
             .await;
 
         let temp_dir = TempDir::new().unwrap();
-        let image = create_test_image_with_url(
-            "noext",
-            "key999",
-            &format!("{}/noext", server.url()),
-        );
+        let image =
+            create_test_image_with_url("noext", "key999", &format!("{}/noext", server.url()));
 
         let client = reqwest::Client::new();
 
@@ -566,11 +562,8 @@ mod tests {
         let output_dir = temp_dir.path().to_path_buf();
         fs::create_dir_all(&output_dir).await.unwrap();
 
-        let image = create_test_image_with_url(
-            "test.jpg",
-            "keymno",
-            &format!("{}/test.jpg", server.url()),
-        );
+        let image =
+            create_test_image_with_url("test.jpg", "keymno", &format!("{}/test.jpg", server.url()));
 
         let client = reqwest::Client::new();
         let result = download_image(&client, &image, &output_dir).await;
@@ -697,11 +690,8 @@ mod tests {
             .await;
 
         let temp_dir1 = TempDir::new().unwrap();
-        let image1 = create_test_image_with_url(
-            "small.jpg",
-            "1",
-            &format!("{}/small.jpg", server.url()),
-        );
+        let image1 =
+            create_test_image_with_url("small.jpg", "1", &format!("{}/small.jpg", server.url()));
 
         let client = reqwest::Client::new();
         let result1 = download_image(&client, &image1, &temp_dir1.path().to_path_buf()).await;
@@ -719,11 +709,8 @@ mod tests {
             .await;
 
         let temp_dir2 = TempDir::new().unwrap();
-        let image2 = create_test_image_with_url(
-            "medium.jpg",
-            "2",
-            &format!("{}/medium.jpg", server.url()),
-        );
+        let image2 =
+            create_test_image_with_url("medium.jpg", "2", &format!("{}/medium.jpg", server.url()));
 
         let result2 = download_image(&client, &image2, &temp_dir2.path().to_path_buf()).await;
         assert!(result2.is_ok());
@@ -740,11 +727,8 @@ mod tests {
             .await;
 
         let temp_dir3 = TempDir::new().unwrap();
-        let image3 = create_test_image_with_url(
-            "large.jpg",
-            "3",
-            &format!("{}/large.jpg", server.url()),
-        );
+        let image3 =
+            create_test_image_with_url("large.jpg", "3", &format!("{}/large.jpg", server.url()));
 
         let result3 = download_image(&client, &image3, &temp_dir3.path().to_path_buf()).await;
         assert!(result3.is_ok());
