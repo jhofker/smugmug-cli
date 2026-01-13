@@ -1,2 +1,40 @@
+# Rust
 /target
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# Environment files
 .env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Testing
+*.profraw
+*.profdata
+
+# Documentation
+/target/doc
