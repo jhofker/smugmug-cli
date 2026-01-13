@@ -1,0 +1,23 @@
+services:
+  smugmug-cli:
+    # Use pre-built image from GitHub Container Registry
+    image: ghcr.io/jhofker/smugmug-cli:latest
+    # Or build locally by uncommenting the line below and commenting out 'image:'
+    # build: .
+    command: upload /photos --album "My Photos" --threads 8
+    environment:
+      # Match your host user to avoid permission issues
+      - PUID=${PUID:-99}
+      - PGID=${PGID:-100}
+      # SmugMug credentials (use .env file or pass directly)
+      - SMUGMUG_API_KEY=${SMUGMUG_API_KEY}
+      - SMUGMUG_API_SECRET=${SMUGMUG_API_SECRET}
+      - SMUGMUG_ACCESS_TOKEN=${SMUGMUG_ACCESS_TOKEN}
+      - SMUGMUG_ACCESS_TOKEN_SECRET=${SMUGMUG_ACCESS_TOKEN_SECRET}
+      - RUST_LOG=info
+    volumes:
+      # Config and cache (persistent)
+      - ${CONFIG_DIR:-~/.config/smugmug-cli}:/home/smugmug/.config/smugmug-cli
+      - ${CACHE_DIR:-~/.cache/smugmug-cli}:/home/smugmug/.cache/smugmug-cli
+      # Photos directory (read-only)
+      - ${PHOTOS_DIR:-./photos}:/photos:ro
