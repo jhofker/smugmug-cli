@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::api::upload::upload_image;
+use crate::api::images::AlbumImage;
+use crate::api::upload::{replace_image, upload_image};
 use crate::api::SmugMugClient;
 use crate::cache::hash_store::{HashStore, UploadedFile};
 
@@ -18,6 +19,10 @@ pub struct UploadWorkerContext {
     pub album_key: String,
     pub hash_store: Arc<Mutex<HashStore>>,
     pub remote_md5s: Option<Arc<std::collections::HashMap<String, String>>>,
+    /// Existing images already in the target album, keyed by filename. Used
+    /// to decide, per file, whether to skip (content unchanged), replace
+    /// (same filename, different content) or create (new filename).
+    pub remote_images: Option<Arc<std::collections::HashMap<String, AlbumImage>>>,
     pub dry_run: bool,
     pub no_cache: bool,
     pub retry_attempts: u32,
@@ -64,13 +69,48 @@ pub async fn upload_worker(
         }
     }
 
-    // Check remote MD5s if enabled
-    if let Some(ref remote_md5s) = context.remote_md5s {
-        let md5_hash =
-            calculate_md5_hash(file_path).with_context(|| "Failed to calculate MD5 hash")?;
+    let filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string());
 
+    // MD5 is needed for both the optional --check-remote scan and the
+    // default same-filename skip/replace comparison below.
+    let needs_md5 = context.remote_md5s.is_some() || context.remote_images.is_some();
+    let md5_hash = if needs_md5 {
+        Some(calculate_md5_hash(file_path).with_context(|| "Failed to calculate MD5 hash")?)
+    } else {
+        None
+    };
+
+    // Check remote MD5s if --check-remote is enabled (matches content
+    // anywhere in the album, regardless of filename)
+    if let (Some(remote_md5s), Some(md5_hash)) = (&context.remote_md5s, &md5_hash) {
         if remote_md5s.contains_key(&md5_hash.to_lowercase()) {
             return Ok(UploadStatus::Skipped);
+        }
+    }
+
+    // If an image with this filename already exists in the album, either
+    // skip (content is unchanged) or replace it in place (content differs)
+    // instead of attempting a fresh create, which SmugMug would reject with
+    // 409 Conflict for a duplicate filename.
+    let mut replace_target: Option<String> = None;
+    if let (Some(remote_images), Some(filename), Some(md5_hash)) =
+        (&context.remote_images, &filename, &md5_hash)
+    {
+        if let Some(remote_image) = remote_images.get(filename) {
+            let remote_md5_matches = remote_image
+                .archived_md5
+                .as_deref()
+                .map(|m| m.eq_ignore_ascii_case(md5_hash))
+                .unwrap_or(false);
+
+            if remote_md5_matches {
+                return Ok(UploadStatus::Skipped);
+            }
+
+            replace_target = Some(remote_image.uri.clone());
         }
     }
 
@@ -89,7 +129,12 @@ pub async fn upload_worker(
     let max_attempts = context.retry_attempts.max(1); // At least 1 attempt
 
     for attempt in 1..=max_attempts {
-        match upload_image(&context.client, &context.album_uri, file_path).await {
+        let upload_attempt = match &replace_target {
+            Some(image_uri) => replace_image(&context.client, image_uri, file_path).await,
+            None => upload_image(&context.client, &context.album_uri, file_path).await,
+        };
+
+        match upload_attempt {
             Ok(upload_result) => {
                 // Success! Update cache and return
                 let uploaded_file = UploadedFile {
@@ -106,7 +151,11 @@ pub async fn upload_worker(
                     store.insert(&hash, uploaded_file)?;
                 }
 
-                return Ok(UploadStatus::Uploaded { file_size });
+                return Ok(if replace_target.is_some() {
+                    UploadStatus::Replaced { file_size }
+                } else {
+                    UploadStatus::Uploaded { file_size }
+                });
             }
             Err(e) => {
                 let error = e.context("Failed to upload image");
@@ -141,9 +190,18 @@ pub async fn upload_worker(
 }
 
 pub enum UploadStatus {
-    Uploaded { file_size: u64 },
+    Uploaded {
+        file_size: u64,
+    },
+    /// An existing image with the same filename was updated in place
+    /// because its content had changed.
+    Replaced {
+        file_size: u64,
+    },
     Skipped,
-    DryRun { file_size: u64 },
+    DryRun {
+        file_size: u64,
+    },
 }
 
 pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
@@ -299,6 +357,7 @@ mod tests {
             album_key: "test_album".to_string(),
             hash_store,
             remote_md5s: None,
+            remote_images: None,
             dry_run: true,
             no_cache: false,
             retry_attempts: 3,
@@ -353,6 +412,7 @@ mod tests {
             album_key: "test_album".to_string(),
             hash_store,
             remote_md5s: None,
+            remote_images: None,
             dry_run: false,
             no_cache: false,
             retry_attempts: 3,
@@ -396,6 +456,7 @@ mod tests {
             album_key: "test_album".to_string(),
             hash_store,
             remote_md5s: Some(Arc::new(remote_md5s)),
+            remote_images: None,
             dry_run: false,
             no_cache: false,
             retry_attempts: 3,
@@ -409,6 +470,75 @@ mod tests {
                 // Success - file was skipped due to remote MD5 match
             }
             _ => panic!("Expected Skipped status due to remote MD5"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upload_worker_skipped_same_filename_matching_md5() {
+        let file = create_test_file(b"unchanged content");
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let hash_store = Arc::new(Mutex::new(
+            HashStore::new(temp_dir.path().to_str().unwrap()).unwrap(),
+        ));
+
+        let filename = file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let md5 = calculate_md5_hash(file.path()).unwrap();
+
+        let mut remote_images = HashMap::new();
+        remote_images.insert(
+            filename,
+            AlbumImage {
+                image_key: "EXISTING123".to_string(),
+                file_name: file
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                archived_uri: "https://example.com/existing.jpg".to_string(),
+                file_size: 100,
+                format: "JPG".to_string(),
+                uri: "/api/v2/image/EXISTING123".to_string(),
+                title: None,
+                archived_md5: Some(md5),
+            },
+        );
+
+        let client = Arc::new(SmugMugClient::new(
+            "test_key".to_string(),
+            "test_secret".to_string(),
+            "test_token".to_string(),
+            "test_token_secret".to_string(),
+        ));
+
+        let context = Arc::new(UploadWorkerContext {
+            client,
+            album_uri: "/api/v2/album/test".to_string(),
+            album_key: "test_album".to_string(),
+            hash_store,
+            remote_md5s: None,
+            remote_images: Some(Arc::new(remote_images)),
+            dry_run: false,
+            no_cache: false,
+            retry_attempts: 3,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+
+        // No local cache entry, but the remote image with the same filename
+        // has matching content, so no upload/replace call should be made.
+        let result = upload_worker(file.path(), context).await.unwrap();
+
+        match result {
+            UploadStatus::Skipped => {}
+            _ => panic!("Expected Skipped status because remote content is unchanged"),
         }
     }
 
@@ -450,6 +580,7 @@ mod tests {
             album_key: "test_album".to_string(),
             hash_store,
             remote_md5s: None,
+            remote_images: None,
             dry_run: true,  // Use dry run to avoid actual upload
             no_cache: true, // This should bypass local cache
             retry_attempts: 3,
@@ -583,6 +714,7 @@ mod tests {
             album_key: "ABC123".to_string(),
             hash_store: hash_store.clone(),
             remote_md5s: Some(Arc::new(remote_md5s)),
+            remote_images: None,
             dry_run: false,
             no_cache: true,
             retry_attempts: 3,

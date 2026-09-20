@@ -178,7 +178,10 @@ enum Commands {
         #[arg(short = 'n', long)]
         dry_run: bool,
 
-        /// Check SmugMug for existing files by MD5 hash (slower but more reliable)
+        /// Also match existing SmugMug images by content hash regardless of
+        /// filename, to skip re-uploading the same content under a
+        /// different name (in addition to the default same-filename
+        /// skip/replace behavior, which always runs)
         #[arg(long)]
         check_remote: bool,
 
@@ -1700,6 +1703,7 @@ async fn main() -> Result<()> {
                                 "Uploaded".green(),
                                 highlight(&stats.uploaded.to_string())
                             );
+                            println!("  {}: {}", "Replaced (modified)".cyan(), stats.replaced);
                             println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
                             println!("  {}: {}", "Failed".red(), stats.failed);
                             println!(
@@ -1747,6 +1751,7 @@ async fn main() -> Result<()> {
                                 "Uploaded".green(),
                                 highlight(&stats.uploaded.to_string())
                             );
+                            println!("  {}: {}", "Replaced (modified)".cyan(), stats.replaced);
                             println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
                             println!("  {}: {}", "Failed".red(), stats.failed);
                             println!(
