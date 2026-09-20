@@ -40,6 +40,22 @@ impl SmugMugClient {
     }
 
     pub fn build_oauth_header(&self, method: &str, url: &str) -> String {
+        self.build_oauth_header_with_query(method, url, &())
+    }
+
+    /// Same as `build_oauth_header`, but for a request that carries query
+    /// parameters (e.g. pagination's `start`/`count`). OAuth1 signing
+    /// requires those parameters to be passed in separately rather than
+    /// embedded in `url` — a `url` containing a `?query` part panics inside
+    /// the oauth1-request crate. Callers must send the request with the same
+    /// `query` value (e.g. reqwest's `.query(query)`) so the signed
+    /// parameters match what is actually sent.
+    pub fn build_oauth_header_with_query<T: oauth::Request>(
+        &self,
+        method: &str,
+        url: &str,
+        query: &T,
+    ) -> String {
         let token = oauth::Token::from_parts(
             &self.api_key,
             &self.api_secret,
@@ -50,11 +66,11 @@ impl SmugMugClient {
         let signer = oauth::HmacSha1::new();
 
         match method {
-            "GET" => oauth::get(url, &(), &token, signer),
-            "POST" => oauth::post(url, &(), &token, signer),
-            "DELETE" => oauth::delete(url, &(), &token, signer),
-            "PATCH" => oauth::patch(url, &(), &token, signer),
-            _ => oauth::get(url, &(), &token, signer),
+            "GET" => oauth::get(url, query, &token, signer),
+            "POST" => oauth::post(url, query, &token, signer),
+            "DELETE" => oauth::delete(url, query, &token, signer),
+            "PATCH" => oauth::patch(url, query, &token, signer),
+            _ => oauth::get(url, query, &token, signer),
         }
     }
 
