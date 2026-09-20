@@ -4,6 +4,45 @@ use serde::{Deserialize, Serialize};
 
 use super::SmugMugClient;
 
+#[derive(Debug, Serialize, oauth1_request::Request)]
+struct PageQuery {
+    start: u32,
+    count: u32,
+}
+
+/// The next page to request when walking a paginated `!children` listing:
+/// either the first page (a plain URL, no query params yet) or a later page
+/// (a base URL plus `start`/`count` params that must be signed and sent
+/// separately — see `SmugMugClient::build_oauth_header_with_query`).
+enum NextPage {
+    First(String),
+    Numbered(String, PageQuery),
+}
+
+/// Splits a `Pages.NextPage` value like
+/// "/api/v2/node/ABC!children?start=11&count=10" into an absolute base URL
+/// (no query string) and its `start`/`count` parameters.
+fn split_next_page(next_page: &str) -> Option<NextPage> {
+    let (path, query_str) = next_page.split_once('?')?;
+    let mut start = None;
+    let mut count = None;
+    for pair in query_str.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        match key {
+            "start" => start = value.parse().ok(),
+            "count" => count = value.parse().ok(),
+            _ => {}
+        }
+    }
+    Some(NextPage::Numbered(
+        format!("https://api.smugmug.com{}", path),
+        PageQuery {
+            start: start?,
+            count: count?,
+        },
+    ))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Album {
     #[serde(rename = "AlbumKey")]
@@ -512,21 +551,31 @@ impl SmugMugClient {
 
         // Now fetch the children using the proper URI, following pagination
         // until the album is found or all pages have been checked.
-        let mut next_url = Some(format!("https://api.smugmug.com{}", child_nodes_uri));
+        let mut next_page = Some(NextPage::First(format!(
+            "https://api.smugmug.com{}",
+            child_nodes_uri
+        )));
 
-        while let Some(children_url) = next_url {
-            let oauth_header = self.build_oauth_header("GET", &children_url);
+        while let Some(page) = next_page {
+            let (children_url, query) = match &page {
+                NextPage::First(url) => (url.clone(), None),
+                NextPage::Numbered(url, query) => (url.clone(), Some(query)),
+            };
+
+            let oauth_header = match query {
+                Some(query) => self.build_oauth_header_with_query("GET", &children_url, query),
+                None => self.build_oauth_header("GET", &children_url),
+            };
 
             let mut headers = HeaderMap::new();
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
             headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-            let response = self
-                .client
-                .get(&children_url)
-                .headers(headers)
-                .send()
-                .await?;
+            let mut request = self.client.get(&children_url).headers(headers);
+            if let Some(query) = query {
+                request = request.query(query);
+            }
+            let response = request.send().await?;
 
             let status = response.status();
             let body_text = response.text().await?;
@@ -564,11 +613,11 @@ impl SmugMugClient {
                 }
             }
 
-            next_url = children_response
+            next_page = children_response
                 .response
                 .pages
                 .and_then(|p| p.next_page)
-                .map(|uri| format!("https://api.smugmug.com{}", uri));
+                .and_then(|uri| split_next_page(&uri));
         }
 
         Ok(None)
@@ -612,23 +661,6 @@ impl SmugMugClient {
         parent_node_uri: &str,
         folder_name: &str,
     ) -> Result<String> {
-        // Get children of parent node
-        let children_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
-        let oauth_header = self.build_oauth_header("GET", &children_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self
-            .client
-            .get(&children_url)
-            .headers(headers)
-            .send()
-            .await?;
-
-        let body_text = response.text().await?;
-
         #[derive(serde::Deserialize)]
         struct ChildNodesResponse {
             #[serde(rename = "Response")]
@@ -639,6 +671,14 @@ impl SmugMugClient {
         struct ChildNodesResponseData {
             #[serde(rename = "Node")]
             nodes: Vec<ChildNodeInfo>,
+            #[serde(rename = "Pages")]
+            pages: Option<PagesInfo>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PagesInfo {
+            #[serde(rename = "NextPage")]
+            next_page: Option<String>,
         }
 
         #[derive(serde::Deserialize)]
@@ -651,13 +691,53 @@ impl SmugMugClient {
             node_type: String,
         }
 
-        if let Ok(children_response) = serde_json::from_str::<ChildNodesResponse>(&body_text) {
+        // Get children of parent node, following pagination until the
+        // folder is found or all pages have been checked.
+        let mut next_page = Some(NextPage::First(format!(
+            "https://api.smugmug.com{}!children",
+            parent_node_uri
+        )));
+
+        while let Some(page) = next_page {
+            let (children_url, query) = match &page {
+                NextPage::First(url) => (url.clone(), None),
+                NextPage::Numbered(url, query) => (url.clone(), Some(query)),
+            };
+
+            let oauth_header = match query {
+                Some(query) => self.build_oauth_header_with_query("GET", &children_url, query),
+                None => self.build_oauth_header("GET", &children_url),
+            };
+
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+            headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+            let mut request = self.client.get(&children_url).headers(headers);
+            if let Some(query) = query {
+                request = request.query(query);
+            }
+            let response = request.send().await?;
+
+            let body_text = response.text().await?;
+
+            let children_response: ChildNodesResponse = match serde_json::from_str(&body_text) {
+                Ok(resp) => resp,
+                Err(_e) => break,
+            };
+
             // Look for existing folder with this name
-            for node in children_response.response.nodes {
+            for node in &children_response.response.nodes {
                 if node.name == folder_name && node.node_type == "Folder" {
-                    return Ok(node.uri);
+                    return Ok(node.uri.clone());
                 }
             }
+
+            next_page = children_response
+                .response
+                .pages
+                .and_then(|p| p.next_page)
+                .and_then(|uri| split_next_page(&uri));
         }
 
         // Folder doesn't exist, create it
@@ -862,27 +942,13 @@ impl SmugMugClient {
 
             let mut children = Vec::new();
 
-            // Fetch children if the node has any
+            // Fetch children if the node has any, following pagination until
+            // all pages have been collected (SmugMug's default page size is
+            // small — e.g. 10 — so a node with more children than that would
+            // otherwise be shown incomplete).
             if node_data.has_children {
                 if let Some(uris) = node_data.uris {
                     if let Some(child_nodes_uri_obj) = uris.child_nodes {
-                        let children_url =
-                            format!("https://api.smugmug.com{}", child_nodes_uri_obj.uri);
-                        let oauth_header = self.build_oauth_header("GET", &children_url);
-
-                        let mut headers = HeaderMap::new();
-                        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-                        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-                        let response = self
-                            .client
-                            .get(&children_url)
-                            .headers(headers)
-                            .send()
-                            .await?;
-
-                        let body_text = response.text().await?;
-
                         #[derive(serde::Deserialize)]
                         struct ChildNodesResponse {
                             #[serde(rename = "Response")]
@@ -893,6 +959,14 @@ impl SmugMugClient {
                         struct ChildNodesResponseData {
                             #[serde(rename = "Node")]
                             nodes: Vec<ChildNodeData>,
+                            #[serde(rename = "Pages")]
+                            pages: Option<PagesInfo>,
+                        }
+
+                        #[derive(serde::Deserialize)]
+                        struct PagesInfo {
+                            #[serde(rename = "NextPage")]
+                            next_page: Option<String>,
                         }
 
                         #[derive(serde::Deserialize)]
@@ -901,12 +975,54 @@ impl SmugMugClient {
                             uri: String,
                         }
 
-                        let children_response: ChildNodesResponse =
-                            serde_json::from_str(&body_text)?;
+                        let mut child_uris = Vec::new();
+                        let mut next_page = Some(NextPage::First(format!(
+                            "https://api.smugmug.com{}",
+                            child_nodes_uri_obj.uri
+                        )));
+
+                        while let Some(page) = next_page {
+                            let (children_url, query) = match &page {
+                                NextPage::First(url) => (url.clone(), None),
+                                NextPage::Numbered(url, query) => (url.clone(), Some(query)),
+                            };
+
+                            let oauth_header = match query {
+                                Some(query) => {
+                                    self.build_oauth_header_with_query("GET", &children_url, query)
+                                }
+                                None => self.build_oauth_header("GET", &children_url),
+                            };
+
+                            let mut headers = HeaderMap::new();
+                            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+                            headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+                            let mut request = self.client.get(&children_url).headers(headers);
+                            if let Some(query) = query {
+                                request = request.query(query);
+                            }
+                            let response = request.send().await?;
+
+                            let body_text = response.text().await?;
+
+                            let children_response: ChildNodesResponse =
+                                serde_json::from_str(&body_text)?;
+
+                            child_uris.extend(
+                                children_response.response.nodes.into_iter().map(|n| n.uri),
+                            );
+
+                            next_page = children_response
+                                .response
+                                .pages
+                                .and_then(|p| p.next_page)
+                                .and_then(|uri| split_next_page(&uri));
+                        }
 
                         // Recursively fetch each child
-                        for child_node in children_response.response.nodes {
-                            match self.fetch_node_tree(&child_node.uri).await {
+                        for child_uri in child_uris {
+                            match self.fetch_node_tree(&child_uri).await {
                                 Ok(child_tree) => children.push(child_tree),
                                 Err(e) => {
                                     eprintln!("Warning: Failed to fetch child node: {}", e);
