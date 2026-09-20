@@ -31,6 +31,28 @@ pub async fn upload_image(
     album_uri: &str,
     file_path: &Path,
 ) -> Result<UploadResult> {
+    send_upload(client, "X-Smug-AlbumUri", album_uri, file_path).await
+}
+
+/// Replace the file content of an existing image, identified by its image URI
+/// (e.g. `/api/v2/image/<key>`). This uploads new bytes onto the existing
+/// image record, keeping its album placement, keywords, and other metadata,
+/// instead of creating a new image (which SmugMug rejects with 409 if an
+/// image with the same filename already exists in the album).
+pub async fn replace_image(
+    client: &crate::api::SmugMugClient,
+    image_uri: &str,
+    file_path: &Path,
+) -> Result<UploadResult> {
+    send_upload(client, "X-Smug-ImageUri", image_uri, file_path).await
+}
+
+async fn send_upload(
+    client: &crate::api::SmugMugClient,
+    target_header: &'static str,
+    target_uri: &str,
+    file_path: &Path,
+) -> Result<UploadResult> {
     // 1. Read file
     let file_data = fs::read(file_path).await?;
     let file_size = file_data.len();
@@ -62,7 +84,7 @@ pub async fn upload_image(
     headers.insert(CONTENT_LENGTH, HeaderValue::from(file_size as u64));
     headers.insert(CONTENT_TYPE, HeaderValue::from_str(&mime_type)?);
     headers.insert("Content-MD5", HeaderValue::from_str(&md5_base64)?);
-    headers.insert("X-Smug-AlbumUri", HeaderValue::from_str(album_uri)?);
+    headers.insert(target_header, HeaderValue::from_str(target_uri)?);
     headers.insert("X-Smug-FileName", HeaderValue::from_str(filename)?);
     headers.insert("X-Smug-Title", HeaderValue::from_str(filename)?);
     headers.insert("X-Smug-ResponseType", HeaderValue::from_static("JSON"));

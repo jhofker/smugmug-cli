@@ -10,6 +10,7 @@ pub mod queue;
 pub mod worker;
 
 use crate::api::albums::Album;
+use crate::api::images::AlbumImage;
 use crate::api::SmugMugClient;
 use crate::cache::hash_store::HashStore;
 use crate::scanner::scan_directory;
@@ -18,6 +19,49 @@ use worker::{upload_worker, UploadStatus, UploadWorkerContext};
 // Re-exported for use in tests and examples
 #[allow(unused_imports)]
 pub use worker::calculate_file_hash;
+
+/// Fetch the images already present in an album and build the lookup maps
+/// used to decide, per local file, whether to skip it (content already
+/// present under the same filename), replace it in place (same filename,
+/// different content), or create it fresh (new filename). This runs by
+/// default so re-running an upload after locally editing photos updates the
+/// existing images instead of failing with a 409 Conflict.
+///
+/// The MD5 index (used by `--check-remote` to detect the same content
+/// uploaded anywhere in the album, under any filename) is built from the
+/// same listing when `include_md5_index` is set, avoiding a second API call.
+async fn fetch_remote_image_maps(
+    client: &SmugMugClient,
+    album_key: &str,
+    include_md5_index: bool,
+) -> Result<(
+    Option<Arc<HashMap<String, AlbumImage>>>,
+    Option<Arc<HashMap<String, String>>>,
+)> {
+    let images = client.list_album_images(album_key).await?;
+
+    let by_filename: HashMap<String, AlbumImage> = images
+        .iter()
+        .cloned()
+        .map(|img| (img.file_name.clone(), img))
+        .collect();
+
+    let by_md5 = if include_md5_index {
+        let md5_map: HashMap<String, String> = images
+            .iter()
+            .filter_map(|img| {
+                img.archived_md5
+                    .as_ref()
+                    .map(|md5| (md5.to_lowercase(), img.image_key.clone()))
+            })
+            .collect();
+        Some(Arc::new(md5_map))
+    } else {
+        None
+    };
+
+    Ok((Some(Arc::new(by_filename)), by_md5))
+}
 
 pub struct UploadOptions {
     pub path: PathBuf,
@@ -35,6 +79,9 @@ pub struct UploadOptions {
 pub struct UploadStats {
     pub total_files: usize,
     pub uploaded: usize,
+    /// Files that replaced an existing, differently-content image with the
+    /// same filename already in the album.
+    pub replaced: usize,
     pub skipped: usize,
     pub failed: usize,
     pub total_bytes: u64,
@@ -60,6 +107,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         return Ok(UploadStats {
             total_files: 0,
             uploaded: 0,
+            replaced: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -107,6 +155,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             return Ok(UploadStats {
                 total_files: 0,
                 uploaded: 0,
+                replaced: 0,
                 skipped: 0,
                 failed: 0,
                 total_bytes: 0,
@@ -137,37 +186,27 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             .progress_chars("#>-"),
     );
 
-    // Fetch remote MD5s if check_remote is enabled
-    let remote_md5s = if options.check_remote {
-        println!("Fetching existing images from SmugMug...");
-        match options
-            .client
-            .list_album_images(&options.album.album_key)
-            .await
-        {
-            Ok(images) => {
-                let md5_map: std::collections::HashMap<String, String> = images
-                    .iter()
-                    .filter_map(|img| {
-                        img.archived_md5
-                            .as_ref()
-                            .map(|md5| (md5.to_lowercase(), img.image_key.clone()))
-                    })
-                    .collect();
-                println!(
-                    "Found {} images with MD5 hashes on SmugMug\n",
-                    md5_map.len()
-                );
-                Some(Arc::new(md5_map))
+    // Fetch existing images in the album so unchanged files are skipped and
+    // locally-edited files are replaced in place instead of hitting a 409.
+    println!("Fetching existing images from SmugMug...");
+    let (remote_images, remote_md5s) = match fetch_remote_image_maps(
+        &options.client,
+        &options.album.album_key,
+        options.check_remote,
+    )
+    .await
+    {
+        Ok((images, md5s)) => {
+            if let Some(ref images) = images {
+                println!("Found {} existing images in album\n", images.len());
             }
-            Err(e) => {
-                println!("Warning: Failed to fetch remote MD5s: {}", e);
-                println!("Continuing with local cache only\n");
-                None
-            }
+            (images, md5s)
         }
-    } else {
-        None
+        Err(e) => {
+            println!("Warning: Failed to fetch existing album images: {}", e);
+            println!("Continuing without remote duplicate/replace detection\n");
+            (None, None)
+        }
     };
 
     // Create worker context
@@ -177,6 +216,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         album_key: options.album.album_key.clone(),
         hash_store: hash_store.clone(),
         remote_md5s,
+        remote_images,
         dry_run: options.dry_run,
         no_cache: options.no_cache,
         retry_attempts: options.retry_attempts,
@@ -187,6 +227,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     let stats = Arc::new(Mutex::new(UploadStats {
         total_files: scanned_files.len(),
         uploaded: 0,
+        replaced: 0,
         skipped: 0,
         failed: 0,
         total_bytes: 0,
@@ -227,6 +268,11 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
                                 stats.total_bytes += file_size;
                                 progress.set_message(format!("Uploaded: {}", file_path.display()));
                             }
+                            UploadStatus::Replaced { file_size, .. } => {
+                                stats.replaced += 1;
+                                stats.total_bytes += file_size;
+                                progress.set_message(format!("Replaced: {}", file_path.display()));
+                            }
                             UploadStatus::Skipped { .. } => {
                                 stats.skipped += 1;
                                 progress.set_message(format!("Skipped: {}", file_path.display()));
@@ -265,6 +311,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     Ok(UploadStats {
         total_files: final_stats.total_files,
         uploaded: final_stats.uploaded,
+        replaced: final_stats.replaced,
         skipped: final_stats.skipped,
         failed: final_stats.failed,
         total_bytes: final_stats.total_bytes,
@@ -368,6 +415,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             return Ok(UploadStats {
                 total_files: 0,
                 uploaded: 0,
+                replaced: 0,
                 skipped: 0,
                 failed: 0,
                 total_bytes: 0,
@@ -383,6 +431,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
         return Ok(UploadStats {
             total_files: 0,
             uploaded: 0,
+            replaced: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -404,6 +453,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
     let stats = Arc::new(Mutex::new(UploadStats {
         total_files,
         uploaded: 0,
+        replaced: 0,
         skipped: 0,
         failed: 0,
         total_bytes: 0,
@@ -494,31 +544,21 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             }
         };
 
-        // Fetch remote MD5s if check_remote is enabled
-        let remote_md5s = if options.check_remote {
-            match options.client.list_album_images(&album.album_key).await {
-                Ok(images) => {
-                    let md5_map: std::collections::HashMap<String, String> = images
-                        .iter()
-                        .filter_map(|img| {
-                            img.archived_md5
-                                .as_ref()
-                                .map(|md5| (md5.to_lowercase(), img.image_key.clone()))
-                        })
-                        .collect();
-                    Some(Arc::new(md5_map))
-                }
+        // Fetch existing images in this album so unchanged files are skipped
+        // and locally-edited files are replaced in place instead of 409ing.
+        let (remote_images, remote_md5s) =
+            match fetch_remote_image_maps(&options.client, &album.album_key, options.check_remote)
+                .await
+            {
+                Ok((images, md5s)) => (images, md5s),
                 Err(e) => {
                     println!(
-                        "Warning: Failed to fetch remote MD5s for {}: {}",
+                        "Warning: Failed to fetch existing images for {}: {}",
                         album.name, e
                     );
-                    None
+                    (None, None)
                 }
-            }
-        } else {
-            None
-        };
+            };
 
         // Create worker context for this album
         let context = Arc::new(UploadWorkerContext {
@@ -527,6 +567,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             album_key: album.album_key.clone(),
             hash_store: hash_store.clone(),
             remote_md5s,
+            remote_images,
             dry_run: options.dry_run,
             no_cache: options.no_cache,
             retry_attempts: options.retry_attempts,
@@ -544,6 +585,12 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
                             s.total_bytes += file_size;
                             overall_progress
                                 .set_message(format!("Uploaded: {}", file_path.display()));
+                        }
+                        UploadStatus::Replaced { file_size, .. } => {
+                            s.replaced += 1;
+                            s.total_bytes += file_size;
+                            overall_progress
+                                .set_message(format!("Replaced: {}", file_path.display()));
                         }
                         UploadStatus::Skipped { .. } => {
                             s.skipped += 1;
@@ -580,6 +627,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
     Ok(UploadStats {
         total_files: final_stats.total_files,
         uploaded: final_stats.uploaded,
+        replaced: final_stats.replaced,
         skipped: final_stats.skipped,
         failed: final_stats.failed,
         total_bytes: final_stats.total_bytes,
@@ -872,6 +920,7 @@ mod tests {
         let stats = UploadStats {
             total_files: 10,
             uploaded: 0,
+            replaced: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -894,6 +943,7 @@ mod tests {
         let mut stats = UploadStats {
             total_files: 10,
             uploaded: 0,
+            replaced: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -994,6 +1044,7 @@ mod tests {
         let stats = Arc::new(Mutex::new(UploadStats {
             total_files: 100,
             uploaded: 0,
+            replaced: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -1032,6 +1083,7 @@ mod tests {
         let stats = UploadStats {
             total_files: 0,
             uploaded: 0,
+            replaced: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -1049,6 +1101,7 @@ mod tests {
         let stats = UploadStats {
             total_files: 10000,
             uploaded: 8500,
+            replaced: 0,
             skipped: 1200,
             failed: 300,
             total_bytes: 50_000_000_000, // 50GB
@@ -1135,6 +1188,7 @@ mod tests {
         let stats = UploadStats {
             total_files: 100,
             uploaded: 70,
+            replaced: 0,
             skipped: 20,
             failed: 10,
             total_bytes: 1_073_741_824, // 1GB
