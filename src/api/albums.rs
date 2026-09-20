@@ -459,28 +459,6 @@ impl SmugMugClient {
             None => return Ok(None),
         };
 
-        // Now fetch the children using the proper URI
-        let children_url = format!("https://api.smugmug.com{}", child_nodes_uri);
-        let oauth_header = self.build_oauth_header("GET", &children_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self
-            .client
-            .get(&children_url)
-            .headers(headers)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_text = response.text().await?;
-
-        if !status.is_success() {
-            return Ok(None);
-        }
-
         #[derive(serde::Deserialize)]
         struct ChildNodesResponse {
             #[serde(rename = "Response")]
@@ -491,6 +469,14 @@ impl SmugMugClient {
         struct ChildNodesResponseData {
             #[serde(rename = "Node")]
             nodes: Vec<ChildNodeInfo>,
+            #[serde(rename = "Pages")]
+            pages: Option<PagesInfo>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct PagesInfo {
+            #[serde(rename = "NextPage")]
+            next_page: Option<String>,
         }
 
         #[derive(serde::Deserialize)]
@@ -511,8 +497,11 @@ impl SmugMugClient {
 
         #[derive(serde::Deserialize)]
         struct ChildNodeUris {
+            // Not every child node is an album (folders/pages have no
+            // Album sub-URI), so this must be optional or a single
+            // non-album sibling breaks deserialization of the whole page.
             #[serde(rename = "Album")]
-            album: AlbumUriRef,
+            album: Option<AlbumUriRef>,
         }
 
         #[derive(serde::Deserialize)]
@@ -521,33 +510,65 @@ impl SmugMugClient {
             uri: String,
         }
 
-        let children_response: ChildNodesResponse = match serde_json::from_str(&body_text) {
-            Ok(resp) => resp,
-            Err(_e) => {
+        // Now fetch the children using the proper URI, following pagination
+        // until the album is found or all pages have been checked.
+        let mut next_url = Some(format!("https://api.smugmug.com{}", child_nodes_uri));
+
+        while let Some(children_url) = next_url {
+            let oauth_header = self.build_oauth_header("GET", &children_url);
+
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+            headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+            let response = self
+                .client
+                .get(&children_url)
+                .headers(headers)
+                .send()
+                .await?;
+
+            let status = response.status();
+            let body_text = response.text().await?;
+
+            if !status.is_success() {
                 return Ok(None);
             }
-        };
 
-        // Look for existing album with this name
-        for node in children_response.response.nodes {
-            if node.name == album_name && node.node_type == "Album" {
-                // The children response already has most of the info we need.
-                // Just need to extract the album key from the URI.
-                let album_uri = &node.uris.album.uri;
-                let album_key = album_uri.split('/').last().unwrap_or("");
+            let children_response: ChildNodesResponse = match serde_json::from_str(&body_text) {
+                Ok(resp) => resp,
+                Err(_e) => {
+                    return Ok(None);
+                }
+            };
 
-                let album = Album {
-                    album_key: album_key.to_string(),
-                    name: node.name.clone(),
-                    url_name: node.url_name.clone(),
-                    node_id: node.node_id.clone(),
-                    uri: album_uri.clone(),
-                    web_uri: Some(node.web_uri.clone()),
-                    uris: None,
-                };
+            // Look for existing album with this name
+            for node in &children_response.response.nodes {
+                if node.name == album_name && node.node_type == "Album" {
+                    if let Some(ref album_ref) = node.uris.album {
+                        let album_uri = &album_ref.uri;
+                        let album_key = album_uri.split('/').next_back().unwrap_or("");
 
-                return Ok(Some(album));
+                        let album = Album {
+                            album_key: album_key.to_string(),
+                            name: node.name.clone(),
+                            url_name: node.url_name.clone(),
+                            node_id: node.node_id.clone(),
+                            uri: album_uri.clone(),
+                            web_uri: Some(node.web_uri.clone()),
+                            uris: None,
+                        };
+
+                        return Ok(Some(album));
+                    }
+                }
             }
+
+            next_url = children_response
+                .response
+                .pages
+                .and_then(|p| p.next_page)
+                .map(|uri| format!("https://api.smugmug.com{}", uri));
         }
 
         Ok(None)
