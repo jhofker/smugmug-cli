@@ -198,6 +198,13 @@ enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
+
+    /// Raw API probes for exploring undocumented endpoints
+    #[command(hide = true)]
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -276,6 +283,25 @@ enum AlbumCommands {
         /// Wait for download generation (polls until ready)
         #[arg(short, long)]
         wait: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DebugCommands {
+    /// Authenticated GET of an API path (e.g. "/api/v2!authuser"); prints status and raw JSON
+    Get {
+        /// API path or absolute URL, query string allowed
+        path: String,
+    },
+
+    /// Upload one file to the Library (no album); prints status and raw JSON
+    LibraryUpload {
+        /// File to upload
+        file: String,
+
+        /// Value for the Filepath field (defaults to the file name)
+        #[arg(long)]
+        filepath: Option<String>,
     },
 }
 
@@ -1782,6 +1808,55 @@ async fn main() -> Result<()> {
                             println!("\n{}", error(&format!("Upload failed: {}", e)));
                         }
                     }
+                }
+            }
+        }
+        Commands::Debug { command } => {
+            let cfg = config::load_config()?;
+            let client = api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            );
+
+            let is_upload = matches!(command, DebugCommands::LibraryUpload { .. });
+            let (status, body) = match command {
+                DebugCommands::Get { path } => client.get_raw(&path).await?,
+                DebugCommands::LibraryUpload { file, filepath } => {
+                    let file_path = std::path::Path::new(&file);
+                    let filepath = filepath.unwrap_or_else(|| {
+                        file_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("image")
+                            .to_string()
+                    });
+                    api::upload::send_library_upload(
+                        &client,
+                        api::upload::LIBRARY_UPLOAD_URL,
+                        file_path,
+                        &filepath,
+                    )
+                    .await?
+                }
+            };
+
+            println!("HTTP {}", status);
+            match serde_json::from_str::<serde_json::Value>(&body) {
+                Ok(json) => println!("{}", serde_json::to_string_pretty(&json)?),
+                Err(_) => println!("{}", body),
+            }
+            if is_upload {
+                match api::upload::parse_library_upload_response(status, &body) {
+                    Ok(result) => println!(
+                        "\n{}",
+                        success(&format!(
+                            "Parsed: image key {} ({})",
+                            result.image_key, result.image_uri
+                        ))
+                    ),
+                    Err(e) => println!("\n{}", error(&format!("Could not parse: {}", e))),
                 }
             }
         }

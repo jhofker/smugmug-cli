@@ -118,6 +118,42 @@ impl SmugMugClient {
         Ok(body)
     }
 
+    /// Authenticated GET of an arbitrary API path (e.g. `/api/v2!authuser`
+    /// or `/api/v2/library?_verbosity=1`) or absolute URL, returning the HTTP
+    /// status and raw body without interpreting either. Query parameters are
+    /// signed separately, as OAuth1 requires. Used for exploring endpoints
+    /// that aren't publicly documented yet.
+    pub async fn get_raw(&self, path_or_url: &str) -> Result<(u16, String)> {
+        let full = if path_or_url.starts_with("http") {
+            path_or_url.to_string()
+        } else {
+            format!("https://api.smugmug.com{}", path_or_url)
+        };
+        let mut url = reqwest::Url::parse(&full)?;
+        let params: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        url.set_query(None);
+
+        let oauth_header = self.build_oauth_header_with_query(
+            "GET",
+            url.as_str(),
+            &oauth::ParameterList::new(params.clone()),
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let response = self
+            .client
+            .get(url)
+            .query(&params)
+            .headers(headers)
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        Ok((status, response.text().await?))
+    }
+
     pub async fn get_with_auth(&self, url: &str) -> Result<reqwest::Response> {
         let oauth_header = self.build_oauth_header("GET", url);
 
