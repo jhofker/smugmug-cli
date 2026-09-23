@@ -119,12 +119,13 @@ impl SmugMugClient {
         Ok(body)
     }
 
-    /// Authenticated GET of an arbitrary API path (e.g. `/api/v2!authuser`
-    /// or `/api/v2/library?_verbosity=1`) or absolute URL, returning the HTTP
-    /// status and raw body without interpreting either. Query parameters are
-    /// signed separately, as OAuth1 requires. Used for exploring endpoints
-    /// that aren't publicly documented yet.
-    pub async fn get_raw(&self, path_or_url: &str) -> Result<(u16, String)> {
+    /// Authenticated request with any HTTP method to an arbitrary API path
+    /// (e.g. `/api/v2!authuser?_verbosity=1`) or absolute URL, returning the
+    /// HTTP status and raw body without interpreting either. Query parameters
+    /// are signed separately, as OAuth1 requires. Used for exploring
+    /// endpoints that aren't publicly documented; OPTIONS makes SmugMug
+    /// describe an endpoint's methods and parameters.
+    pub async fn request_raw(&self, method: &str, path_or_url: &str) -> Result<(u16, String)> {
         let full = if path_or_url.starts_with("http") {
             path_or_url.to_string()
         } else {
@@ -134,8 +135,14 @@ impl SmugMugClient {
         let params: Vec<(String, String)> = url.query_pairs().into_owned().collect();
         url.set_query(None);
 
-        let oauth_header = self.build_oauth_header_with_query(
-            "GET",
+        let token = oauth::Token::from_parts(
+            self.api_key.as_str(),
+            self.api_secret.as_str(),
+            self.access_token.as_str(),
+            self.access_token_secret.as_str(),
+        );
+        let oauth_header = oauth::Builder::with_token(token, oauth::HmacSha1::new()).authorize(
+            method,
             url.as_str(),
             &oauth::ParameterList::new(params.clone()),
         );
@@ -146,7 +153,7 @@ impl SmugMugClient {
 
         let response = self
             .client
-            .get(url)
+            .request(reqwest::Method::from_bytes(method.as_bytes())?, url)
             .query(&params)
             .headers(headers)
             .send()

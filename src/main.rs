@@ -295,6 +295,10 @@ enum DebugCommands {
     Get {
         /// API path or absolute URL, query string allowed
         path: String,
+
+        /// HTTP method to send instead of GET (e.g. OPTIONS)
+        #[arg(short = 'X', long, default_value = "GET")]
+        method: String,
     },
 
     /// Upload one file to the Library (no album); prints status and raw JSON
@@ -1828,7 +1832,9 @@ async fn main() -> Result<()> {
 
             let is_upload = matches!(command, DebugCommands::LibraryUpload { .. });
             let (status, body) = match command {
-                DebugCommands::Get { path } => client.get_raw(&path).await?,
+                DebugCommands::Get { path, method } => {
+                    client.request_raw(&method.to_uppercase(), &path).await?
+                }
                 DebugCommands::LibraryUpload { file, filepath } => {
                     let file_path = std::path::Path::new(&file);
                     let filepath = filepath.unwrap_or_else(|| {
