@@ -27,6 +27,14 @@ pub struct UploadConfig {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub has_smugmug_source: bool,
+    /// Folder that `upload` puts monthly albums in when no `--album` is
+    /// given. Created private if it doesn't exist.
+    #[serde(default = "default_upload_folder")]
+    pub default_folder: String,
+}
+
+fn default_upload_folder() -> String {
+    "Uploads".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,6 +61,7 @@ impl Default for Config {
                 retry_attempts: 3,
                 timeout_seconds: 300,
                 has_smugmug_source: false,
+                default_folder: default_upload_folder(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
@@ -443,12 +452,37 @@ mod tests {
                 retry_attempts: 5,
                 timeout_seconds: 600,
                 has_smugmug_source: false,
+                default_folder: default_upload_folder(),
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
                 cache_path: PathBuf::from("/tmp/test_cache.db"),
             },
         }
+    }
+
+    #[test]
+    fn test_config_without_default_folder_uses_uploads() {
+        // Configs written before default_folder existed must still load.
+        let toml_str = r#"
+[auth]
+api_key = "k"
+api_secret = "s"
+access_token = "t"
+access_token_secret = "ts"
+
+[upload]
+threads = 4
+retry_attempts = 3
+timeout_seconds = 300
+
+[deduplication]
+enabled = true
+cache_path = "/tmp/cache"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.upload.default_folder, "Uploads");
+        assert_eq!(Config::default().upload.default_folder, "Uploads");
     }
 
     #[test]
@@ -835,6 +869,7 @@ cache_path = "/absolute/path/cache.db"
             retry_attempts: 3,
             timeout_seconds: 300,
             has_smugmug_source: false,
+            default_folder: default_upload_folder(),
         };
 
         let debug_string = format!("{:?}", upload);
@@ -868,6 +903,7 @@ cache_path = "/absolute/path/cache.db"
                 retry_attempts: 5,
                 timeout_seconds: 600,
                 has_smugmug_source: false,
+                default_folder: default_upload_folder(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,

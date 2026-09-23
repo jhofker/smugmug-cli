@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub mod album_series;
 pub mod queue;
 pub mod worker;
 
@@ -13,7 +14,7 @@ use crate::api::albums::Album;
 use crate::api::images::AlbumImage;
 use crate::api::SmugMugClient;
 use crate::cache::hash_store::HashStore;
-use crate::scanner::scan_directory;
+use album_series::AlbumBatch;
 use queue::UploadQueue;
 use worker::{upload_worker, UploadStatus, UploadWorkerContext};
 // Re-exported for use in tests and examples
@@ -64,8 +65,9 @@ async fn fetch_remote_image_maps(
 }
 
 pub struct UploadOptions {
-    pub path: PathBuf,
-    pub album: Album,
+    /// Files to upload, already assigned to albums (see
+    /// `album_series::plan_album_batches`).
+    pub batches: Vec<AlbumBatch>,
     pub client: Arc<SmugMugClient>,
     pub threads: usize,
     pub dry_run: bool,
@@ -90,21 +92,9 @@ pub struct UploadStats {
     pub duration_secs: u64,
 }
 
-pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
-    let start_time = std::time::Instant::now();
-
-    // Initialize hash store for deduplication
-    let hash_store = Arc::new(Mutex::new(
-        HashStore::new(&options.cache_path.to_string_lossy())
-            .context("Failed to initialize hash store")?,
-    ));
-
-    // Scan directory for files
-    let scanned_files = scan_directory(&options.path).context("Failed to scan directory")?;
-
-    if scanned_files.is_empty() {
-        println!("No files found to upload");
-        return Ok(UploadStats {
+impl UploadStats {
+    fn empty(start_time: std::time::Instant) -> Self {
+        UploadStats {
             total_files: 0,
             uploaded: 0,
             replaced: 0,
@@ -114,20 +104,39 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             folders_created: 0,
             albums_created: 0,
             duration_secs: start_time.elapsed().as_secs(),
-        });
+        }
+    }
+}
+
+pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
+    let start_time = std::time::Instant::now();
+
+    // Initialize hash store for deduplication
+    let hash_store = Arc::new(Mutex::new(
+        HashStore::new(&options.cache_path.to_string_lossy())
+            .context("Failed to initialize hash store")?,
+    ));
+
+    let total_files: usize = options.batches.iter().map(|b| b.files.len()).sum();
+
+    if total_files == 0 {
+        println!("No files found to upload");
+        return Ok(UploadStats::empty(start_time));
     }
 
     // Check for RAW files and warn if SmugMug Source is not enabled
-    let raw_files: Vec<_> = scanned_files
+    let raw_count = options
+        .batches
         .iter()
-        .filter(|f| crate::scanner::is_raw_file(&f.path))
-        .collect();
+        .flat_map(|b| &b.files)
+        .filter(|f| crate::scanner::is_raw_file(f))
+        .count();
 
-    if !raw_files.is_empty() && !options.has_smugmug_source {
+    if raw_count > 0 && !options.has_smugmug_source {
         println!(
             "\n{} {}",
             "⚠".yellow().bold(),
-            format!("Warning: {} RAW files detected", raw_files.len())
+            format!("Warning: {} RAW files detected", raw_count)
                 .yellow()
                 .bold()
         );
@@ -152,31 +161,15 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
 
         if !proceed {
             println!("{}", "Upload cancelled.".red());
-            return Ok(UploadStats {
-                total_files: 0,
-                uploaded: 0,
-                replaced: 0,
-                skipped: 0,
-                failed: 0,
-                total_bytes: 0,
-                folders_created: 0,
-                albums_created: 0,
-                duration_secs: start_time.elapsed().as_secs(),
-            });
+            return Ok(UploadStats::empty(start_time));
         }
     }
 
-    // Create upload queue
-    let mut queue = UploadQueue::new();
-    for file in &scanned_files {
-        queue.add(file.path.clone());
-    }
-
-    println!("Found {} files to process", scanned_files.len());
+    println!("Found {} files to process", total_files);
 
     // Setup progress bars
     let multi_progress = MultiProgress::new();
-    let overall_progress = multi_progress.add(ProgressBar::new(scanned_files.len() as u64));
+    let overall_progress = multi_progress.add(ProgressBar::new(total_files as u64));
     overall_progress.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -186,65 +179,117 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             .progress_chars("#>-"),
     );
 
-    // Fetch existing images in the album so unchanged files are skipped and
-    // locally-edited files are replaced in place instead of hitting a 409.
-    println!("Fetching existing images from SmugMug...");
-    let (remote_images, remote_md5s) = match fetch_remote_image_maps(
-        &options.client,
-        &options.album.album_key,
-        options.check_remote,
-    )
-    .await
-    {
-        Ok((images, md5s)) => {
-            if let Some(ref images) = images {
-                println!("Found {} existing images in album\n", images.len());
-            }
-            (images, md5s)
-        }
-        Err(e) => {
-            println!("Warning: Failed to fetch existing album images: {}", e);
-            println!("Continuing without remote duplicate/replace detection\n");
-            (None, None)
-        }
-    };
-
-    // Create worker context
-    let context = Arc::new(UploadWorkerContext {
-        client: options.client,
-        album_uri: format!("/api/v2/album/{}", options.album.album_key),
-        album_key: options.album.album_key.clone(),
-        hash_store: hash_store.clone(),
-        remote_md5s,
-        remote_images,
-        dry_run: options.dry_run,
-        no_cache: options.no_cache,
-        retry_attempts: options.retry_attempts,
-        skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    });
-
     // Track statistics
     let stats = Arc::new(Mutex::new(UploadStats {
-        total_files: scanned_files.len(),
-        uploaded: 0,
-        replaced: 0,
-        skipped: 0,
-        failed: 0,
-        total_bytes: 0,
-        folders_created: 0,
-        albums_created: 0,
-        duration_secs: 0,
+        total_files,
+        albums_created: options.batches.iter().filter(|b| b.new_album).count(),
+        ..UploadStats::empty(start_time)
     }));
 
-    // Process files with concurrent workers
+    let skip_raw_files = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    for batch in options.batches {
+        if batch.files.is_empty() {
+            continue;
+        }
+
+        // Fetch existing images in the album so unchanged files are skipped
+        // and locally-edited files are replaced in place instead of hitting
+        // a 409. A new album (or a dry run's placeholder) has none.
+        let (remote_images, remote_md5s) = if batch.new_album {
+            (None, None)
+        } else {
+            overall_progress.println(format!(
+                "Fetching existing images from album '{}'...",
+                batch.album.name
+            ));
+            match fetch_remote_image_maps(
+                &options.client,
+                &batch.album.album_key,
+                options.check_remote,
+            )
+            .await
+            {
+                Ok((images, md5s)) => {
+                    if let Some(ref images) = images {
+                        overall_progress
+                            .println(format!("Found {} existing images in album", images.len()));
+                    }
+                    (images, md5s)
+                }
+                Err(e) => {
+                    overall_progress.println(format!(
+                        "Warning: Failed to fetch existing album images: {}\n\
+                         Continuing without remote duplicate/replace detection",
+                        e
+                    ));
+                    (None, None)
+                }
+            }
+        };
+
+        let context = Arc::new(UploadWorkerContext {
+            client: options.client.clone(),
+            album_uri: format!("/api/v2/album/{}", batch.album.album_key),
+            album_key: batch.album.album_key.clone(),
+            hash_store: hash_store.clone(),
+            remote_md5s,
+            remote_images,
+            dry_run: options.dry_run,
+            no_cache: options.no_cache,
+            retry_attempts: options.retry_attempts,
+            skip_raw_files: skip_raw_files.clone(),
+        });
+
+        let mut queue = UploadQueue::new();
+        for file in batch.files {
+            queue.add(file);
+        }
+
+        run_upload_workers(
+            queue,
+            context,
+            options.threads,
+            stats.clone(),
+            overall_progress.clone(),
+        )
+        .await?;
+    }
+
+    overall_progress.finish_with_message("Upload complete");
+
+    // Return final statistics
+    let final_stats = stats.lock().await;
+    Ok(UploadStats {
+        total_files: final_stats.total_files,
+        uploaded: final_stats.uploaded,
+        replaced: final_stats.replaced,
+        skipped: final_stats.skipped,
+        failed: final_stats.failed,
+        total_bytes: final_stats.total_bytes,
+        folders_created: 0,
+        albums_created: final_stats.albums_created,
+        duration_secs: start_time.elapsed().as_secs(),
+    })
+}
+
+/// Drain `queue` with `threads` concurrent workers uploading into the album
+/// described by `context`, recording results in `stats`.
+async fn run_upload_workers(
+    queue: UploadQueue,
+    context: Arc<UploadWorkerContext>,
+    threads: usize,
+    stats: Arc<Mutex<UploadStats>>,
+    progress: ProgressBar,
+) -> Result<()> {
     let queue = Arc::new(Mutex::new(queue));
     let mut handles = vec![];
 
-    for _ in 0..options.threads {
+    for _ in 0..threads.max(1) {
         let queue = queue.clone();
         let context = context.clone();
         let stats = stats.clone();
-        let progress = overall_progress.clone();
+        let progress = progress.clone();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -303,22 +348,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     for handle in handles {
         handle.await?;
     }
-
-    overall_progress.finish_with_message("Upload complete");
-
-    // Return final statistics
-    let final_stats = stats.lock().await;
-    Ok(UploadStats {
-        total_files: final_stats.total_files,
-        uploaded: final_stats.uploaded,
-        replaced: final_stats.replaced,
-        skipped: final_stats.skipped,
-        failed: final_stats.failed,
-        total_bytes: final_stats.total_bytes,
-        folders_created: 0,
-        albums_created: 0,
-        duration_secs: start_time.elapsed().as_secs(),
-    })
+    Ok(())
 }
 
 pub struct UploadStructureOptions {
@@ -891,11 +921,15 @@ mod tests {
             web_uri: Some("https://example.com/album".to_string()),
             node_id: "node123".to_string(),
             uris: None,
+            image_count: None,
         };
 
         let options = UploadOptions {
-            path: PathBuf::from("/test/path"),
-            album: album.clone(),
+            batches: vec![AlbumBatch {
+                album: album.clone(),
+                files: vec![PathBuf::from("/test/path/a.jpg")],
+                new_album: false,
+            }],
             client: client.clone(),
             threads: 4,
             dry_run: true,
@@ -906,8 +940,8 @@ mod tests {
             has_smugmug_source: false,
         };
 
-        assert_eq!(options.path, PathBuf::from("/test/path"));
-        assert_eq!(options.album.album_key, "ABC123");
+        assert_eq!(options.batches.len(), 1);
+        assert_eq!(options.batches[0].album.album_key, "ABC123");
         assert_eq!(options.threads, 4);
         assert!(options.dry_run);
         assert!(!options.check_remote);

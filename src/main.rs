@@ -169,13 +169,24 @@ enum Commands {
         #[arg(short, long, default_value = "4")]
         threads: usize,
 
-        /// Album name (creates if doesn't exist)
+        /// Album name (creates if doesn't exist). Without it, files go to a
+        /// monthly album (e.g. "2026-09") in the configured default folder
+        /// ("Uploads" unless changed), or in --parent if given
         #[arg(short, long)]
         album: Option<String>,
 
         /// Parent folder path (e.g., "2024/Travel" creates album in Travel folder)
         #[arg(short, long)]
         parent: Option<String>,
+
+        /// Recreate the directory structure as SmugMug folders and albums
+        #[arg(long, conflicts_with_all = ["album", "parent", "interactive"])]
+        structure: bool,
+
+        /// Ask how to upload (single album or folder structure) instead of
+        /// using the default destination
+        #[arg(short, long, conflicts_with = "album")]
+        interactive: bool,
 
         /// Dry run - don't actually upload
         #[arg(short = 'n', long)]
@@ -1549,6 +1560,8 @@ async fn main() -> Result<()> {
             threads,
             album,
             parent,
+            structure,
+            interactive,
             dry_run,
             check_remote,
             no_cache,
@@ -1561,12 +1574,23 @@ async fn main() -> Result<()> {
                 cfg.auth.access_token_secret,
             ));
 
+            // With no album, folder or mode given, upload to this month's album
+            // in the default folder.
+            let use_default_destination = album.is_none() && !structure && !interactive;
+
             // Determine upload mode and album name
-            let (upload_mode, album_name) = if let Some(name) = album {
+            let (upload_mode, album_name) = if structure {
+                (UploadMode::MaintainStructure, String::new())
+            } else if let Some(name) = album {
                 // Album specified via CLI, use single album mode
                 (UploadMode::SingleAlbum, name)
+            } else if use_default_destination {
+                (
+                    UploadMode::SingleAlbum,
+                    chrono::Local::now().format("%Y-%m").to_string(),
+                )
             } else {
-                // No album specified, prompt user
+                // --interactive: prompt user
                 use dialoguer::{Input, Select};
 
                 println!("\nNo album specified. How would you like to upload?");
@@ -1603,9 +1627,19 @@ async fn main() -> Result<()> {
                 }
             };
 
+            // Folder the album series lives in, if any
+            let folder_path = if use_default_destination && parent.is_none() {
+                Some(cfg.upload.default_folder.clone())
+            } else {
+                parent.clone()
+            };
+
             println!("Uploading from: {}", path);
             if matches!(upload_mode, UploadMode::SingleAlbum) {
-                println!("Album: {}", album_name);
+                match &folder_path {
+                    Some(folder) => println!("Album: {}/{}", folder, album_name),
+                    None => println!("Album: {}", album_name),
+                }
             }
             println!("Threads: {}", threads);
             if dry_run {
@@ -1629,13 +1663,37 @@ async fn main() -> Result<()> {
             // Handle upload based on mode
             match upload_mode {
                 UploadMode::SingleAlbum => {
-                    // Find or create parent folder if specified
-                    let parent_node_uri = if let Some(ref parent_path) = parent {
-                        println!("Finding/creating folder path: {}", parent_path);
-                        match client.find_or_create_folder_path(parent_path).await {
-                            Ok(uri) => {
-                                println!("✓ Using folder: {}\n", parent_path);
-                                Some(uri)
+                    use uploader::album_series::{
+                        plan_album_batches, AlbumScope, ClientAlbumSeries, MAX_ALBUM_IMAGES,
+                    };
+
+                    // Find or create the folder the album series lives in
+                    // (a dry run only looks). The default folder is created
+                    // private; a --parent folder keeps SmugMug's default
+                    // privacy, as before.
+                    let scope = if let Some(ref folder) = folder_path {
+                        println!("Finding/creating folder path: {}", folder);
+                        let privacy = if use_default_destination && parent.is_none() {
+                            Some("Private")
+                        } else {
+                            None
+                        };
+                        let found = if dry_run {
+                            client.find_folder_path(folder).await
+                        } else {
+                            client
+                                .find_or_create_folder_path(folder, privacy)
+                                .await
+                                .map(Some)
+                        };
+                        match found {
+                            Ok(Some(uri)) => {
+                                println!("✓ Using folder: {}\n", folder);
+                                AlbumScope::Folder(uri)
+                            }
+                            Ok(None) => {
+                                println!("• Would create folder: {}\n", folder);
+                                AlbumScope::MissingFolder
                             }
                             Err(e) => {
                                 println!("✗ Failed to find/create folder path: {}", e);
@@ -1643,78 +1701,72 @@ async fn main() -> Result<()> {
                             }
                         }
                     } else {
-                        None
+                        AlbumScope::Anywhere
                     };
 
-                    // Get or create the album
+                    let files: Vec<std::path::PathBuf> =
+                        match scanner::scan_directory(std::path::Path::new(&path)) {
+                            Ok(scanned) => scanned.into_iter().map(|f| f.path).collect(),
+                            Err(e) => {
+                                println!("✗ Failed to scan {}: {}", path, e);
+                                return Ok(());
+                            }
+                        };
+
+                    // Spread the files over "Name", "Name (2)", ... so no
+                    // album goes over SmugMug's per-gallery limit.
                     println!("Looking up album...");
-                    let album = if let Some(parent_uri) = parent_node_uri.as_deref() {
-                        // Parent specified, check if album exists in that folder first
-                        match client.find_album_in_folder(parent_uri, &album_name).await {
-                            Ok(Some(existing_album)) => {
-                                println!(
-                                    "✓ Found existing album: {} (Key: {})",
-                                    existing_album.name, existing_album.album_key
-                                );
-                                if let Some(ref web_uri) = existing_album.web_uri {
-                                    println!("  URL: {}", web_uri);
-                                }
-                                println!();
-                                existing_album
-                            }
-                            Ok(None) => {
-                                // Album doesn't exist, create it (private by default)
-                                match client
-                                    .create_album(&album_name, Some(parent_uri), "Private")
-                                    .await
-                                {
-                                    Ok(album) => {
-                                        println!(
-                                            "✓ Created album: {} (Key: {}) [Private]",
-                                            album.name, album.album_key
-                                        );
-                                        if let Some(ref web_uri) = album.web_uri {
-                                            println!("  URL: {}", web_uri);
-                                        }
-                                        println!();
-                                        album
-                                    }
-                                    Err(e) => {
-                                        println!("✗ Failed to create album: {}", e);
-                                        return Ok(());
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                println!("✗ Failed to search for album: {}", e);
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        // No parent specified, use root and check for existing
-                        match client.get_or_create_album(&album_name).await {
-                            Ok(album) => {
-                                println!(
-                                    "✓ Using album: {} (Key: {})",
-                                    album.name, album.album_key
-                                );
-                                if let Some(ref web_uri) = album.web_uri {
-                                    println!("  URL: {}", web_uri);
-                                }
-                                println!();
-                                album
-                            }
-                            Err(e) => {
-                                println!("✗ Failed to get/create album: {}", e);
-                                return Ok(());
-                            }
+                    let backend = ClientAlbumSeries::new(client.clone(), scope);
+                    let batches = match plan_album_batches(
+                        &backend,
+                        &album_name,
+                        files,
+                        MAX_ALBUM_IMAGES,
+                        dry_run,
+                    )
+                    .await
+                    {
+                        Ok(batches) => batches,
+                        Err(e) => {
+                            println!("✗ Failed to find/create album: {}", e);
+                            return Ok(());
                         }
                     };
+
+                    for batch in &batches {
+                        let count = batch.files.len();
+                        if batch.new_album && batch.album.album_key.is_empty() {
+                            println!(
+                                "• Would create album: {} [Private] ({} files)",
+                                batch.album.name, count
+                            );
+                        } else if batch.new_album {
+                            println!(
+                                "✓ Created album: {} (Key: {}) [Private] ({} files)",
+                                batch.album.name, batch.album.album_key, count
+                            );
+                        } else {
+                            println!(
+                                "✓ Using album: {} (Key: {}) ({} files)",
+                                batch.album.name, batch.album.album_key, count
+                            );
+                        }
+                        if let Some(ref web_uri) = batch.album.web_uri {
+                            println!("  URL: {}", web_uri);
+                        }
+                    }
+                    if batches.len() > 1 {
+                        println!(
+                            "  (split across {} albums: SmugMug allows {} per album)",
+                            batches.len(),
+                            MAX_ALBUM_IMAGES
+                        );
+                    }
+                    println!();
 
                     // Set up upload options
                     let upload_options = uploader::UploadOptions {
-                        path: std::path::PathBuf::from(path),
-                        album,
+                        batches,
                         client,
                         threads,
                         dry_run,
