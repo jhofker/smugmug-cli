@@ -6,6 +6,7 @@ use serde_json::Value;
 pub mod albums;
 pub mod comments;
 pub mod images;
+pub mod oauth_flow;
 pub mod upload;
 
 #[derive(Debug)]

@@ -136,6 +136,9 @@ enum Commands {
     /// Initialize configuration and authenticate with SmugMug
     Init,
 
+    /// Sign in through your browser to get (or refresh) an access token
+    Auth,
+
     /// Test authentication credentials
     TestAuth,
 
@@ -430,7 +433,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Check if auth is configured for commands that require it
-    if !matches!(cli.command, Commands::Init) && !config::is_auth_configured() {
+    if !matches!(cli.command, Commands::Init | Commands::Auth) && !config::is_auth_configured() {
         println!("\n{}", warning("Authentication not configured!"));
         println!(
             "\n{}",
@@ -453,6 +456,9 @@ async fn main() -> Result<()> {
         Commands::Init => {
             println!("Initializing SmugMug CLI...");
             config::init_config().await?;
+        }
+        Commands::Auth => {
+            config::auth_command().await?;
         }
         Commands::TestAuth => {
             println!("Testing authentication...");
