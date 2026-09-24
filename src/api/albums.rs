@@ -1,5 +1,5 @@
-use anyhow::Result;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use anyhow::{Context, Result};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use super::SmugMugClient;
@@ -59,6 +59,12 @@ pub struct Album {
     pub web_uri: Option<String>,
     #[serde(rename = "Uris", skip_serializing_if = "Option::is_none")]
     pub uris: Option<AlbumUris>,
+    #[serde(
+        rename = "ImageCount",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub image_count: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -606,6 +612,7 @@ impl SmugMugClient {
                             uri: album_uri.clone(),
                             web_uri: Some(node.web_uri.clone()),
                             uris: None,
+                            image_count: None,
                         };
 
                         return Ok(Some(album));
@@ -623,7 +630,32 @@ impl SmugMugClient {
         Ok(None)
     }
 
-    pub async fn find_or_create_folder_path(&self, folder_path: &str) -> Result<String> {
+    /// Find or create each folder along `folder_path` (e.g. "2024/Travel")
+    /// and return the last one's node URI. `privacy` (Public, Unlisted or
+    /// Private) is set on any folder that has to be created; `None` leaves
+    /// SmugMug's default. Existing folders are left as they are.
+    pub async fn find_or_create_folder_path(
+        &self,
+        folder_path: &str,
+        privacy: Option<&str>,
+    ) -> Result<String> {
+        self.walk_folder_path(folder_path, privacy, true)
+            .await?
+            .context("Folder path could not be created")
+    }
+
+    /// Node URI of the folder at `folder_path`, or `None` if any folder along
+    /// it doesn't exist. Creates nothing.
+    pub async fn find_folder_path(&self, folder_path: &str) -> Result<Option<String>> {
+        self.walk_folder_path(folder_path, None, false).await
+    }
+
+    async fn walk_folder_path(
+        &self,
+        folder_path: &str,
+        privacy: Option<&str>,
+        create_missing: bool,
+    ) -> Result<Option<String>> {
         // Get the root node URI
         let auth_user_url = "https://api.smugmug.com/api/v2!authuser";
         let oauth_header = self.build_oauth_header("GET", auth_user_url);
@@ -648,19 +680,30 @@ impl SmugMugClient {
 
         for folder_name in path_parts {
             // Check if folder exists in current node's children
-            current_node_uri = self
-                .find_or_create_child_folder(&current_node_uri, folder_name)
-                .await?;
+            match self
+                .find_or_create_child_folder(
+                    &current_node_uri,
+                    folder_name,
+                    privacy,
+                    create_missing,
+                )
+                .await?
+            {
+                Some(uri) => current_node_uri = uri,
+                None => return Ok(None),
+            }
         }
 
-        Ok(current_node_uri)
+        Ok(Some(current_node_uri))
     }
 
     async fn find_or_create_child_folder(
         &self,
         parent_node_uri: &str,
         folder_name: &str,
-    ) -> Result<String> {
+        privacy: Option<&str>,
+        create_missing: bool,
+    ) -> Result<Option<String>> {
         #[derive(serde::Deserialize)]
         struct ChildNodesResponse {
             #[serde(rename = "Response")]
@@ -729,7 +772,7 @@ impl SmugMugClient {
             // Look for existing folder with this name
             for node in &children_response.response.nodes {
                 if node.name == folder_name && node.node_type == "Folder" {
-                    return Ok(node.uri.clone());
+                    return Ok(Some(node.uri.clone()));
                 }
             }
 
@@ -738,6 +781,10 @@ impl SmugMugClient {
                 .pages
                 .and_then(|p| p.next_page)
                 .and_then(|uri| split_next_page(&uri));
+        }
+
+        if !create_missing {
+            return Ok(None);
         }
 
         // Folder doesn't exist, create it
@@ -749,10 +796,13 @@ impl SmugMugClient {
         headers.insert("Accept", HeaderValue::from_static("application/json"));
         headers.insert("Content-Type", HeaderValue::from_static("application/json"));
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "Type": "Folder",
             "Name": folder_name,
         });
+        if let Some(privacy) = privacy {
+            body["Privacy"] = serde_json::json!(privacy);
+        }
 
         let response = self
             .client
@@ -788,10 +838,9 @@ impl SmugMugClient {
         }
 
         let node_response: CreateNodeResponse = serde_json::from_str(&body_text)?;
-        Ok(node_response.response.node.uri)
+        Ok(Some(node_response.response.node.uri))
     }
 
-    #[allow(dead_code)]
     pub async fn get_album(&self, album_key: &str) -> Result<Album> {
         let album_url = format!("https://api.smugmug.com/api/v2/album/{}", album_key);
         let oauth_header = self.build_oauth_header("GET", &album_url);
@@ -825,40 +874,6 @@ impl SmugMugClient {
         }
 
         Ok(())
-    }
-
-    pub async fn get_or_create_album(&self, name: &str) -> Result<Album> {
-        // Try to find an existing album with this name
-        let albums = self.list_albums().await?;
-
-        for album in albums {
-            if album.name == name {
-                return Ok(album);
-            }
-        }
-
-        // Album not found, try to create it (private by default)
-        match self.create_album(name, None, "Private").await {
-            Ok(album) => Ok(album),
-            Err(e) => {
-                // If we get a conflict error, the album likely exists but wasn't in the cached list
-                // Try listing albums again to get the fresh data
-                let error_msg = e.to_string();
-                if error_msg.contains("409") || error_msg.contains("Conflict") {
-                    let albums = self.list_albums().await?;
-                    for album in albums {
-                        if album.name == name {
-                            return Ok(album);
-                        }
-                    }
-                    // Still not found, return the original error
-                    anyhow::bail!("Album '{}' exists but couldn't be retrieved: {}", name, e);
-                } else {
-                    // Different error, return it
-                    Err(e)
-                }
-            }
-        }
     }
 
     pub async fn get_node_tree(&self) -> Result<super::NodeTree> {
@@ -1198,7 +1213,7 @@ impl SmugMugClient {
 
     /// Get album download link with polling (max 10 attempts, 3s intervals)
     pub async fn get_album_download_link(&self, album_key: &str) -> Result<String> {
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
 
         // Request download
         let info = self.request_album_download(album_key).await?;
@@ -1263,6 +1278,7 @@ mod tests {
             uri: "/api/v2/album/ABC123".to_string(),
             web_uri: Some("https://user.smugmug.com/test-album".to_string()),
             uris: None,
+            image_count: None,
         };
 
         let json = serde_json::to_string(&album).unwrap();
@@ -1595,6 +1611,7 @@ mod tests {
             uri: "/api/v2/album/ABC123".to_string(),
             web_uri: Some("https://user.smugmug.com/test-album".to_string()),
             uris: None,
+            image_count: None,
         };
 
         let cloned = album.clone();

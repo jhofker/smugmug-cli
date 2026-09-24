@@ -1,5 +1,5 @@
 # Multi-stage build for minimal image size
-FROM rust:1.83-alpine AS builder
+FROM rust:1.88-alpine AS builder
 
 WORKDIR /usr/src/smugmug-cli
 
@@ -7,13 +7,13 @@ WORKDIR /usr/src/smugmug-cli
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 
 # Copy manifests
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 
 # Copy source code
 COPY src ./src
 
 # Build the application
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage - use Alpine for minimal size
 FROM alpine:latest

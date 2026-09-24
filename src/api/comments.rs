@@ -1,5 +1,5 @@
 use anyhow::Result;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use super::SmugMugClient;
@@ -270,10 +270,12 @@ mod tests {
 
         let result = client.create_image_comment("IMG123", request).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("60,000 characters"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("60,000 characters")
+        );
     }
 
     #[tokio::test]

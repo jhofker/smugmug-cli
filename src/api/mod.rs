@@ -1,11 +1,12 @@
 use anyhow::Result;
 use oauth1_request as oauth;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 pub mod albums;
 pub mod comments;
 pub mod images;
+pub mod oauth_flow;
 pub mod upload;
 
 #[derive(Debug)]
@@ -116,6 +117,49 @@ impl SmugMugClient {
 
         let body: Value = serde_json::from_str(&body_text)?;
         Ok(body)
+    }
+
+    /// Authenticated request with any HTTP method to an arbitrary API path
+    /// (e.g. `/api/v2!authuser?_verbosity=1`) or absolute URL, returning the
+    /// HTTP status and raw body without interpreting either. Query parameters
+    /// are signed separately, as OAuth1 requires. Used for exploring
+    /// endpoints that aren't publicly documented; OPTIONS makes SmugMug
+    /// describe an endpoint's methods and parameters.
+    pub async fn request_raw(&self, method: &str, path_or_url: &str) -> Result<(u16, String)> {
+        let full = if path_or_url.starts_with("http") {
+            path_or_url.to_string()
+        } else {
+            format!("https://api.smugmug.com{}", path_or_url)
+        };
+        let mut url = reqwest::Url::parse(&full)?;
+        let params: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        url.set_query(None);
+
+        let token = oauth::Token::from_parts(
+            self.api_key.as_str(),
+            self.api_secret.as_str(),
+            self.access_token.as_str(),
+            self.access_token_secret.as_str(),
+        );
+        let oauth_header = oauth::Builder::with_token(token, oauth::HmacSha1::new()).authorize(
+            method,
+            url.as_str(),
+            &oauth::ParameterList::new(params.clone()),
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+        headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+        let response = self
+            .client
+            .request(reqwest::Method::from_bytes(method.as_bytes())?, url)
+            .query(&params)
+            .headers(headers)
+            .send()
+            .await?;
+        let status = response.status().as_u16();
+        Ok((status, response.text().await?))
     }
 
     pub async fn get_with_auth(&self, url: &str) -> Result<reqwest::Response> {

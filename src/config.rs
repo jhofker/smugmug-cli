@@ -27,6 +27,14 @@ pub struct UploadConfig {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub has_smugmug_source: bool,
+    /// Folder that `upload` puts monthly albums in when no `--album` is
+    /// given. Created private if it doesn't exist.
+    #[serde(default = "default_upload_folder")]
+    pub default_folder: String,
+}
+
+fn default_upload_folder() -> String {
+    "Uploads".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,6 +61,7 @@ impl Default for Config {
                 retry_attempts: 3,
                 timeout_seconds: 300,
                 has_smugmug_source: false,
+                default_folder: default_upload_folder(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
@@ -77,8 +86,8 @@ pub async fn init_config() -> Result<()> {
     println!("To get your API credentials:");
     println!("1. Go to https://api.smugmug.com/api/developer/apply");
     println!("2. Create an application to get your API Key and Secret");
-    println!("3. Go to your SmugMug Account Settings > Privacy > Authorized Services");
-    println!("4. Click 'token' next to your application to get your Access Token and Secret\n");
+    println!("3. Sign in through your browser when prompted to get an Access Token and Secret");
+    println!("   (or run 'smugmug-cli auth' later to refresh them)\n");
 
     // Try to load defaults from .env file (if it exists)
     let _ = dotenvy::dotenv();
@@ -103,20 +112,32 @@ pub async fn init_config() -> Result<()> {
         input.interact_text()?
     };
 
-    let access_token: String = {
-        let mut input = Input::new().with_prompt("Access Token");
-        if let Some(default) = env_access_token {
-            input = input.with_initial_text(default);
-        }
-        input.interact_text()?
-    };
+    let use_browser = env_access_token.is_none()
+        && Confirm::new()
+            .with_prompt("Sign in to SmugMug in your browser to get an access token?")
+            .default(true)
+            .interact()?;
 
-    let access_token_secret: String = {
-        let mut input = Input::new().with_prompt("Access Token Secret");
-        if let Some(default) = env_access_token_secret {
-            input = input.with_initial_text(default);
-        }
-        input.interact_text()?
+    let (access_token, access_token_secret) = if use_browser {
+        let pair = browser_sign_in(&api_key, &api_secret).await?;
+        (pair.token, pair.secret)
+    } else {
+        let access_token: String = {
+            let mut input = Input::new().with_prompt("Access Token");
+            if let Some(default) = env_access_token {
+                input = input.with_initial_text(default);
+            }
+            input.interact_text()?
+        };
+
+        let access_token_secret: String = {
+            let mut input = Input::new().with_prompt("Access Token Secret");
+            if let Some(default) = env_access_token_secret {
+                input = input.with_initial_text(default);
+            }
+            input.interact_text()?
+        };
+        (access_token, access_token_secret)
     };
 
     // Test authentication and detect SmugMug Source
@@ -257,6 +278,119 @@ pub async fn init_config() -> Result<()> {
     Ok(())
 }
 
+/// Interactive OAuth sign-in: prints the authorize link, waits for the
+/// verifier code SmugMug shows after approval, and returns the access token
+/// pair.
+async fn browser_sign_in(
+    api_key: &str,
+    api_secret: &str,
+) -> Result<crate::api::oauth_flow::TokenPair> {
+    use crate::api::oauth_flow::{
+        OAuthEndpoints, authorize_url, get_access_token, get_request_token,
+    };
+
+    let endpoints = OAuthEndpoints::default();
+    let request_token = get_request_token(&endpoints, api_key, api_secret).await?;
+
+    println!(
+        "\n{}",
+        "Open this link, sign in, and approve access:".cyan()
+    );
+    println!(
+        "\n  {}\n",
+        authorize_url(&endpoints, &request_token)
+            .bright_white()
+            .bold()
+    );
+
+    let verifier: String = Input::new()
+        .with_prompt("Code shown by SmugMug after approving")
+        .interact_text()?;
+
+    let pair = get_access_token(
+        &endpoints,
+        api_key,
+        api_secret,
+        &request_token,
+        verifier.trim(),
+    )
+    .await?;
+    println!("{}", "✓ Access token received".green().bold());
+    Ok(pair)
+}
+
+/// `smugmug-cli auth`: obtain a new access token through the browser and
+/// store it. Uses the API key/secret from the existing config, else from
+/// the environment/.env, else prompts. Creates the config if missing.
+pub async fn auth_command() -> Result<()> {
+    let _ = dotenvy::dotenv();
+    let existing = load_config().ok();
+
+    let (api_key, api_secret) = match &existing {
+        Some(cfg) if !cfg.auth.api_key.is_empty() && !cfg.auth.api_secret.is_empty() => {
+            (cfg.auth.api_key.clone(), cfg.auth.api_secret.clone())
+        }
+        _ => {
+            let key = match std::env::var("SMUGMUG_API_KEY") {
+                Ok(v) if !v.is_empty() => v,
+                _ => Input::new().with_prompt("API Key").interact_text()?,
+            };
+            let secret = match std::env::var("SMUGMUG_API_SECRET") {
+                Ok(v) if !v.is_empty() => v,
+                _ => Input::new().with_prompt("API Secret").interact_text()?,
+            };
+            (key, secret)
+        }
+    };
+
+    let pair = browser_sign_in(&api_key, &api_secret).await?;
+
+    let client = crate::api::SmugMugClient::new(
+        api_key.clone(),
+        api_secret.clone(),
+        pair.token.clone(),
+        pair.secret.clone(),
+    );
+    let user = client
+        .get_auth_user()
+        .await
+        .context("Signed in, but the new access token was rejected")?;
+    if let Some(nick) = user["Response"]["User"]["NickName"].as_str() {
+        println!(
+            "{} {}",
+            "✓ Authenticated as".green().bold(),
+            nick.bright_white().bold()
+        );
+    }
+
+    let is_new = existing.is_none();
+    let mut config = existing.unwrap_or_default();
+    config.auth.api_key = api_key;
+    config.auth.api_secret = api_secret;
+    config.auth.access_token = pair.token;
+    config.auth.access_token_secret = pair.secret;
+
+    if is_new {
+        // Same detection init does, without the interactive override.
+        if let Some(user_uri) = user["Response"]["User"]["Uri"].as_str() {
+            if let Ok(features) = client.get_user_features(user_uri).await {
+                config.upload.has_smugmug_source =
+                    features["Response"]["Features"]["PremiumStorage"]
+                        .as_bool()
+                        .unwrap_or(false);
+            }
+        }
+    }
+
+    save_config(&config)?;
+    println!(
+        "{} {}",
+        "✓".green().bold(),
+        format!("Credentials saved to: {}", get_config_path()?.display()).green()
+    );
+    Ok(())
+}
+
 pub fn load_config() -> Result<Config> {
     let config_path = get_config_path()?;
 
@@ -318,12 +452,37 @@ mod tests {
                 retry_attempts: 5,
                 timeout_seconds: 600,
                 has_smugmug_source: false,
+                default_folder: default_upload_folder(),
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
                 cache_path: PathBuf::from("/tmp/test_cache.db"),
             },
         }
+    }
+
+    #[test]
+    fn test_config_without_default_folder_uses_uploads() {
+        // Configs written before default_folder existed must still load.
+        let toml_str = r#"
+[auth]
+api_key = "k"
+api_secret = "s"
+access_token = "t"
+access_token_secret = "ts"
+
+[upload]
+threads = 4
+retry_attempts = 3
+timeout_seconds = 300
+
+[deduplication]
+enabled = true
+cache_path = "/tmp/cache"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.upload.default_folder, "Uploads");
+        assert_eq!(Config::default().upload.default_folder, "Uploads");
     }
 
     #[test]
@@ -343,11 +502,13 @@ mod tests {
 
         // Deduplication defaults
         assert!(config.deduplication.enabled);
-        assert!(config
-            .deduplication
-            .cache_path
-            .to_string_lossy()
-            .ends_with("hashes.db"));
+        assert!(
+            config
+                .deduplication
+                .cache_path
+                .to_string_lossy()
+                .ends_with("hashes.db")
+        );
     }
 
     #[test]
@@ -710,6 +871,7 @@ cache_path = "/absolute/path/cache.db"
             retry_attempts: 3,
             timeout_seconds: 300,
             has_smugmug_source: false,
+            default_folder: default_upload_folder(),
         };
 
         let debug_string = format!("{:?}", upload);
@@ -743,6 +905,7 @@ cache_path = "/absolute/path/cache.db"
                 retry_attempts: 5,
                 timeout_seconds: 600,
                 has_smugmug_source: false,
+                default_folder: default_upload_folder(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,

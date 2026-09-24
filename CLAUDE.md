@@ -79,8 +79,14 @@ Authentication is handled by `SmugMugClient::build_oauth_header()` which generat
 Cache location: `~/.cache/smugmug-cli/hash_store/`
 
 ### Upload Modes
-- **Single Album**: Flatten all images into one album (with optional parent folder)
-- **Maintain Structure**: Preserve directory structure as folders/albums on SmugMug
+- **Default destination** (no `--album`): monthly album (`YYYY-MM`) in the private `upload.default_folder` (default `Uploads`), or in `--parent`
+- **Single Album** (`--album`): Flatten all images into one album (with optional parent folder)
+- **Maintain Structure** (`--structure`): Preserve directory structure as folders/albums on SmugMug
+- `--interactive` brings back the old prompt to choose between the last two
+
+Single-album and default uploads are planned into album batches by `uploader/album_series.rs`: SmugMug caps albums at 5,000 images, so files overflow into `Name (2)`, `Name (3)`, ... (`plan_album_batches`, tested against an in-memory backend). Dry runs create no folders or albums.
+
+SmugMug's Library ("All Media") would be the natural default destination, but its endpoints (`upload.smugmug.com/api/v2/library`, `/api/v2/library!assets`) return 404 to OAuth API keys as of 2026-09; `api::upload::upload_to_library` and the hidden `debug` commands are kept for when that changes.
 
 ### Configuration Priority
 1. Environment variables (SMUGMUG_API_KEY, etc.)

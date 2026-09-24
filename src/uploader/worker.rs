@@ -8,9 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::api::SmugMugClient;
 use crate::api::images::AlbumImage;
 use crate::api::upload::{replace_image, upload_image};
-use crate::api::SmugMugClient;
 use crate::cache::hash_store::{HashStore, UploadedFile};
 
 pub struct UploadWorkerContext {
@@ -218,7 +218,7 @@ pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
         hasher.update(&buffer[..count]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn calculate_md5_hash(file_path: &Path) -> Result<String> {
@@ -235,7 +235,7 @@ fn calculate_md5_hash(file_path: &Path) -> Result<String> {
         context.consume(&buffer[..count]);
     }
 
-    Ok(format!("{:x}", context.compute()))
+    Ok(format!("{:x}", context.finalize()))
 }
 
 #[cfg(test)]

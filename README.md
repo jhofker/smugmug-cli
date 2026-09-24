@@ -147,6 +147,8 @@ access_token_secret = "your_access_token_secret"
 [upload]
 threads = 4
 retry_attempts = 3
+# Folder for monthly albums when `upload` gets no --album (created private)
+default_folder = "Uploads"
 
 [deduplication]
 enabled = true
@@ -157,6 +159,7 @@ enabled = true
 ### Setup & Authentication
 
 - `smugmug-cli init` - Initialize configuration and authenticate with SmugMug (interactive setup)
+- `smugmug-cli auth` - Sign in through your browser to get (or refresh) an access token
 - `smugmug-cli test-auth` - Test that your credentials are working
 
 ### Upload
@@ -165,11 +168,20 @@ enabled = true
   - `--threads <N>` - Number of concurrent upload threads (default: 4)
   - `--album <NAME>` - Album name (creates if doesn't exist, private by default)
   - `--parent <PATH>` - Parent folder path (e.g., "2024/Travel")
-  - `--dry-run` - Preview what would be uploaded without uploading
+  - `--structure` - Recreate the directory structure as SmugMug folders and albums
+  - `--interactive` - Ask whether to upload to one album or keep the folder structure
+  - `--dry-run` - Preview what would be uploaded without uploading (creates no folders or albums)
   - `--check-remote` - Check SmugMug for existing files by MD5 hash (slower but more reliable)
   - `--no-cache` - Disable local cache (always check files, even if previously uploaded)
 
-**Note:** Albums created automatically during upload are set to private by default. Use `albums settings` to change privacy after creation.
+**Where files go:** with no `--album`, files go to an album named for the current month
+(e.g. `2026-09`) inside the `default_folder` from your config (`Uploads` unless changed), or
+inside `--parent` if given. The default folder and all auto-created albums are private; use
+`albums settings` to change privacy after creation.
+
+**Album size limit:** SmugMug allows 5,000 photos and videos per album. When an upload would go
+past that, it continues in `Name (2)`, `Name (3)`, and so on, filling any partly-used album in
+the series first. This applies to `--album` too. (`--structure` uploads aren't split.)
 
 ### Albums
 
