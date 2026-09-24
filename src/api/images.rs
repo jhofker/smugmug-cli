@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::SmugMugClient;
-use super::albums::{NextPage, split_next_page};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AlbumImage {
@@ -24,27 +23,6 @@ pub struct AlbumImage {
     pub title: Option<String>,
     #[serde(rename = "ArchivedMD5", skip_serializing_if = "Option::is_none")]
     pub archived_md5: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImagesResponse {
-    #[serde(rename = "Response")]
-    response: ImagesResponseData,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImagesResponseData {
-    // Absent for an empty album (or page).
-    #[serde(rename = "AlbumImage", default)]
-    images: Vec<AlbumImage>,
-    #[serde(rename = "Pages")]
-    pages: Option<ImagesPages>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImagesPages {
-    #[serde(rename = "NextPage")]
-    next_page: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -103,54 +81,10 @@ pub struct ImageMetadataUpdate {
 }
 
 impl SmugMugClient {
-    /// Every image in the album, following the listing's pagination (SmugMug
-    /// returns at most one page, 100 images by default, per request).
+    /// Every image in the album, across all pages of the listing.
     pub async fn list_album_images(&self, album_key: &str) -> Result<Vec<AlbumImage>> {
-        let mut images = Vec::new();
-        let mut next_page = Some(NextPage::First(format!(
-            "https://api.smugmug.com/api/v2/album/{}!images",
-            album_key
-        )));
-
-        while let Some(page) = next_page {
-            let (url, query) = match &page {
-                NextPage::First(url) => (url.clone(), None),
-                NextPage::Numbered(url, query) => (url.clone(), Some(query)),
-            };
-
-            let oauth_header = match query {
-                Some(query) => self.build_oauth_header_with_query("GET", &url, query),
-                None => self.build_oauth_header("GET", &url),
-            };
-
-            let mut headers = HeaderMap::new();
-            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-            headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-            let mut request = self.client.get(&url).headers(headers);
-            if let Some(query) = query {
-                request = request.query(query);
-            }
-            let response = request.send().await?;
-
-            let status = response.status();
-            let body_text = response.text().await?;
-
-            if !status.is_success() {
-                anyhow::bail!("Failed to list album images: {} - {}", status, body_text);
-            }
-
-            let images_data: ImagesResponse = serde_json::from_str(&body_text)?;
-            images.extend(images_data.response.images);
-
-            next_page = images_data
-                .response
-                .pages
-                .and_then(|p| p.next_page)
-                .and_then(|uri| split_next_page(&uri));
-        }
-
-        Ok(images)
+        let images_url = format!("https://api.smugmug.com/api/v2/album/{}!images", album_key);
+        self.get_all_pages(&images_url, "AlbumImage").await
     }
 
     pub async fn get_image_details(&self, image_key: &str) -> Result<ImageDetails> {
@@ -259,33 +193,6 @@ impl SmugMugClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_images_page_with_next_page() {
-        let json = r#"{"Response":{
-            "AlbumImage":[{"ImageKey":"a","FileName":"a.jpg","ArchivedUri":"https://x/a.jpg","ArchivedSize":1,"Format":"JPG","Uri":"/api/v2/album/K/image/a-0"}],
-            "Pages":{"Total":765,"Start":1,"Count":100,
-                     "NextPage":"/api/v2/album/K!images?start=101&count=100"}}}"#;
-        let page: ImagesResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(page.response.images.len(), 1);
-        let next = page.response.pages.and_then(|p| p.next_page).unwrap();
-        match split_next_page(&next) {
-            Some(NextPage::Numbered(url, query)) => {
-                assert_eq!(url, "https://api.smugmug.com/api/v2/album/K!images");
-                assert_eq!((query.start, query.count), (101, 100));
-            }
-            _ => panic!("expected a numbered next page"),
-        }
-    }
-
-    #[test]
-    fn test_images_page_empty_album() {
-        // An empty album's listing has no AlbumImage key at all.
-        let json = r#"{"Response":{"Pages":{"Total":0,"Start":1,"Count":0}}}"#;
-        let page: ImagesResponse = serde_json::from_str(json).unwrap();
-        assert!(page.response.images.is_empty());
-        assert!(page.response.pages.unwrap().next_page.is_none());
-    }
 
     fn create_test_client() -> SmugMugClient {
         SmugMugClient::new(
@@ -478,9 +385,12 @@ mod tests {
             }
         }"#;
 
-        let response: ImagesResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.response.images.len(), 1);
-        assert_eq!(response.response.images[0].image_key, "IMG123");
+        // list_album_images reads each page's Response.AlbumImage array.
+        let mut response: serde_json::Value = serde_json::from_str(json).unwrap();
+        let images: Vec<AlbumImage> =
+            serde_json::from_value(response["Response"]["AlbumImage"].take()).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].image_key, "IMG123");
     }
 
     #[tokio::test]

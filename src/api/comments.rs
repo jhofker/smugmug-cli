@@ -1,5 +1,4 @@
-use anyhow::Result;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::SmugMugClient;
@@ -55,12 +54,16 @@ pub struct CreateCommentRequest {
     pub link: Option<String>,
 }
 
+// Shape of one page of a comments listing (read through
+// `get_all_pages` in the client; kept for the deserialization tests).
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct CommentsResponse {
     #[serde(rename = "Response")]
     response: CommentsResponseData,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct CommentsResponseData {
     #[serde(rename = "Comment")]
@@ -86,28 +89,9 @@ impl SmugMugClient {
             "https://api.smugmug.com/api/v2/image/{}!comments",
             image_key
         );
-        let oauth_header = self.build_oauth_header("GET", &comments_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self
-            .client
-            .get(&comments_url)
-            .headers(headers)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_text = response.text().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Failed to list comments: {} - {}", status, body_text);
-        }
-
-        let comments_response: CommentsResponse = serde_json::from_str(&body_text)?;
-        Ok(comments_response.response.comments)
+        self.get_all_pages(&comments_url, "Comment")
+            .await
+            .context("Failed to list comments")
     }
 
     /// Create a new comment on an image

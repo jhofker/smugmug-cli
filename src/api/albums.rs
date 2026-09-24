@@ -95,18 +95,6 @@ pub struct AlbumDownloadInfo {
 }
 
 #[derive(Debug, Deserialize)]
-struct AlbumsResponse {
-    #[serde(rename = "Response")]
-    response: AlbumsResponseData,
-}
-
-#[derive(Debug, Deserialize)]
-struct AlbumsResponseData {
-    #[serde(rename = "Album")]
-    albums: Vec<Album>,
-}
-
-#[derive(Debug, Deserialize)]
 struct UserResponse {
     #[serde(rename = "Response")]
     response: UserResponseData,
@@ -219,27 +207,14 @@ impl SmugMugClient {
         let user_uri = user_data.response.user.uri;
         let user_nickname = user_data.response.user.nickname;
 
-        // Now get the albums for this user using the !albums expansion
+        // Now get all of this user's albums, across every page of the listing
         let albums_url = format!("https://api.smugmug.com{}!albums", user_uri);
-        let oauth_header = self.build_oauth_header("GET", &albums_url);
-
-        headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self.client.get(&albums_url).headers(headers).send().await?;
-
-        let status = response.status();
-        let body_text = response.text().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Failed to list albums: {} - {}", status, body_text);
-        }
-
-        let albums_data: AlbumsResponse = serde_json::from_str(&body_text)?;
+        let mut albums: Vec<Album> = self
+            .get_all_pages(&albums_url, "Album")
+            .await
+            .context("Failed to list albums")?;
 
         // Add web URLs to all albums
-        let mut albums = albums_data.response.albums;
         for album in &mut albums {
             if album.web_uri.is_none() {
                 album.web_uri = Some(format!(

@@ -849,22 +849,6 @@ async fn find_existing_folder(
     name: &str,
     parent_node_uri: &str,
 ) -> Result<String> {
-    // Get children of the parent node
-    let children_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
-    let response = client.get_with_auth(&children_url).await?;
-
-    #[derive(serde::Deserialize)]
-    struct ChildrenResponse {
-        #[serde(rename = "Response")]
-        response: ChildrenResponseData,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ChildrenResponseData {
-        #[serde(rename = "Node")]
-        nodes: Vec<NodeInfo>,
-    }
-
     #[derive(serde::Deserialize)]
     struct NodeInfo {
         #[serde(rename = "Name")]
@@ -875,10 +859,12 @@ async fn find_existing_folder(
         uri: String,
     }
 
-    let children: ChildrenResponse = response.json().await?;
+    // Get every child of the parent node (all pages)
+    let children_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
+    let nodes: Vec<NodeInfo> = client.get_all_pages(&children_url, "Node").await?;
 
     // Find the folder with the matching name
-    for node in children.response.nodes {
+    for node in nodes {
         if node.node_type == "Folder" && node.name == name {
             return Ok(node.uri);
         }

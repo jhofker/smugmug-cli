@@ -162,6 +162,76 @@ impl SmugMugClient {
         Ok((status, response.text().await?))
     }
 
+    /// GET a SmugMug list endpoint (e.g. `.../album/KEY!images`) and every
+    /// following page, returning all items of the `locator` array (e.g.
+    /// "AlbumImage", "Album", "Comment", "Node") from each page's `Response`.
+    /// SmugMug returns one page per request (often 100 items, sometimes
+    /// fewer) and links the next one as `Response.Pages.NextPage`; a missing
+    /// `locator` array (empty list) yields no items. Later pages are fetched
+    /// from the same host as `first_url`, with their query parameters
+    /// signed separately as OAuth1 requires.
+    pub async fn get_all_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        first_url: &str,
+        locator: &str,
+    ) -> Result<Vec<T>> {
+        let origin = {
+            let parsed = reqwest::Url::parse(first_url)?;
+            parsed.origin().ascii_serialization()
+        };
+
+        let mut items = Vec::new();
+        let mut next: Option<(String, Vec<(String, String)>)> =
+            Some((first_url.to_string(), Vec::new()));
+        let mut pages = 0;
+
+        while let Some((url, params)) = next.take() {
+            pages += 1;
+            if pages > 10_000 {
+                anyhow::bail!("Gave up listing {} after 10,000 pages", first_url);
+            }
+
+            let oauth_header = self.build_oauth_header_with_query(
+                "GET",
+                &url,
+                &oauth::ParameterList::new(params.clone()),
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+            headers.insert("Accept", HeaderValue::from_static("application/json"));
+
+            let mut request = self.client.get(&url).headers(headers);
+            if !params.is_empty() {
+                request = request.query(&params);
+            }
+            let response = request.send().await?;
+            let status = response.status();
+            let body_text = response.text().await?;
+            if !status.is_success() {
+                anyhow::bail!("Request to {} failed: {} - {}", url, status, body_text);
+            }
+
+            let mut body: Value = serde_json::from_str(&body_text)?;
+            let response_data = &mut body["Response"];
+            if let Some(array) = response_data.get_mut(locator).map(Value::take) {
+                let page_items: Vec<T> = serde_json::from_value(array)?;
+                items.extend(page_items);
+            }
+
+            next = response_data["Pages"]["NextPage"]
+                .as_str()
+                .map(|next_page| {
+                    let (path, query) = next_page.split_once('?').unwrap_or((next_page, ""));
+                    let params = url::form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect();
+                    (format!("{}{}", origin, path), params)
+                });
+        }
+
+        Ok(items)
+    }
+
     pub async fn get_with_auth(&self, url: &str) -> Result<reqwest::Response> {
         let oauth_header = self.build_oauth_header("GET", url);
 
@@ -228,6 +298,88 @@ impl SmugMugClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Item {
+        #[serde(rename = "Name")]
+        name: String,
+    }
+
+    #[tokio::test]
+    async fn test_get_all_pages_follows_next_page() {
+        let mut server = mockito::Server::new_async().await;
+        let first = server
+            .mock("GET", "/api/v2/thing!items")
+            .match_query(mockito::Matcher::Missing)
+            .with_body(
+                r#"{"Response":{"Item":[{"Name":"a"},{"Name":"b"}],
+                    "Pages":{"Total":3,"Start":1,"Count":2,
+                             "NextPage":"/api/v2/thing!items?start=3&count=2"}}}"#,
+            )
+            .create_async()
+            .await;
+        let second = server
+            .mock("GET", "/api/v2/thing!items")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("start".into(), "3".into()),
+                mockito::Matcher::UrlEncoded("count".into(), "2".into()),
+            ]))
+            .match_header(
+                "authorization",
+                mockito::Matcher::Regex("oauth_signature=".to_string()),
+            )
+            .with_body(
+                r#"{"Response":{"Item":[{"Name":"c"}],
+                    "Pages":{"Total":3,"Start":3,"Count":1}}}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = create_test_client();
+        let items: Vec<Item> = client
+            .get_all_pages(&format!("{}/api/v2/thing!items", server.url()), "Item")
+            .await
+            .unwrap();
+
+        first.assert_async().await;
+        second.assert_async().await;
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn test_get_all_pages_empty_list() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/api/v2/thing!items")
+            .with_body(r#"{"Response":{"Pages":{"Total":0,"Start":1,"Count":0}}}"#)
+            .create_async()
+            .await;
+
+        let client = create_test_client();
+        let items: Vec<Item> = client
+            .get_all_pages(&format!("{}/api/v2/thing!items", server.url()), "Item")
+            .await
+            .unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_pages_error_status() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/api/v2/thing!items")
+            .with_status(404)
+            .with_body(r#"{"Code":404,"Message":"Not Found"}"#)
+            .create_async()
+            .await;
+
+        let client = create_test_client();
+        let result: Result<Vec<Item>> = client
+            .get_all_pages(&format!("{}/api/v2/thing!items", server.url()), "Item")
+            .await;
+        assert!(result.unwrap_err().to_string().contains("404"));
+    }
 
     fn create_test_client() -> SmugMugClient {
         SmugMugClient::new(
