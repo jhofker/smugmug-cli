@@ -7,13 +7,13 @@ WORKDIR /usr/src/smugmug-cli
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static
 
 # Copy manifests
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 
 # Copy source code
 COPY src ./src
 
 # Build the application
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage - use Alpine for minimal size
 FROM alpine:latest
