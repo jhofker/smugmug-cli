@@ -5,16 +5,16 @@ use serde::{Deserialize, Serialize};
 use super::SmugMugClient;
 
 #[derive(Debug, Serialize, oauth1_request::Request)]
-struct PageQuery {
-    start: u32,
-    count: u32,
+pub(super) struct PageQuery {
+    pub(super) start: u32,
+    pub(super) count: u32,
 }
 
 /// The next page to request when walking a paginated `!children` listing:
 /// either the first page (a plain URL, no query params yet) or a later page
 /// (a base URL plus `start`/`count` params that must be signed and sent
 /// separately — see `SmugMugClient::build_oauth_header_with_query`).
-enum NextPage {
+pub(super) enum NextPage {
     First(String),
     Numbered(String, PageQuery),
 }
@@ -22,7 +22,7 @@ enum NextPage {
 /// Splits a `Pages.NextPage` value like
 /// "/api/v2/node/ABC!children?start=11&count=10" into an absolute base URL
 /// (no query string) and its `start`/`count` parameters.
-fn split_next_page(next_page: &str) -> Option<NextPage> {
+pub(super) fn split_next_page(next_page: &str) -> Option<NextPage> {
     let (path, query_str) = next_page.split_once('?')?;
     let mut start = None;
     let mut count = None;
@@ -92,18 +92,6 @@ pub struct AlbumDownloadInfo {
 
     #[serde(rename = "Uri", skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AlbumsResponse {
-    #[serde(rename = "Response")]
-    response: AlbumsResponseData,
-}
-
-#[derive(Debug, Deserialize)]
-struct AlbumsResponseData {
-    #[serde(rename = "Album")]
-    albums: Vec<Album>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,27 +207,14 @@ impl SmugMugClient {
         let user_uri = user_data.response.user.uri;
         let user_nickname = user_data.response.user.nickname;
 
-        // Now get the albums for this user using the !albums expansion
+        // Now get all of this user's albums, across every page of the listing
         let albums_url = format!("https://api.smugmug.com{}!albums", user_uri);
-        let oauth_header = self.build_oauth_header("GET", &albums_url);
-
-        headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self.client.get(&albums_url).headers(headers).send().await?;
-
-        let status = response.status();
-        let body_text = response.text().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Failed to list albums: {} - {}", status, body_text);
-        }
-
-        let albums_data: AlbumsResponse = serde_json::from_str(&body_text)?;
+        let mut albums: Vec<Album> = self
+            .get_all_pages(&albums_url, "Album")
+            .await
+            .context("Failed to list albums")?;
 
         // Add web URLs to all albums
-        let mut albums = albums_data.response.albums;
         for album in &mut albums {
             if album.web_uri.is_none() {
                 album.web_uri = Some(format!(

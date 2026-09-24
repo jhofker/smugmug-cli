@@ -12,11 +12,16 @@ use crate::api::SmugMugClient;
 use crate::api::images::AlbumImage;
 use crate::api::upload::{replace_image, upload_image};
 use crate::cache::hash_store::{HashStore, UploadedFile};
+use crate::uploader::album_series::{AlbumSeries, ClientAlbumSeries};
 
 pub struct UploadWorkerContext {
     pub client: Arc<SmugMugClient>,
+    /// Target album for new images, unless `series` is set.
     pub album_uri: String,
     pub album_key: String,
+    /// When set, each new image claims room in this album series instead of
+    /// going to `album_uri` (see `album_series`).
+    pub series: Option<Arc<AlbumSeries<ClientAlbumSeries>>>,
     pub hash_store: Arc<Mutex<HashStore>>,
     pub remote_md5s: Option<Arc<std::collections::HashMap<String, String>>>,
     /// Existing images already in the target album, keyed by filename. Used
@@ -119,19 +124,62 @@ pub async fn upload_worker(
         .with_context(|| "Failed to get file metadata")?
         .len();
 
+    // A new image in an album series claims room in the first album that has
+    // some, which may create that album. This happens only now, once the file
+    // is known to need uploading, so skipped files never use up space. On a
+    // dry run the claim is still made (without creating anything) so the
+    // summary shows where files would go.
+    let (album_uri, album_key, claimed) = match (&context.series, &replace_target) {
+        (Some(series), None) => {
+            let album = series.claim().await?;
+            (album.uri.clone(), album.album_key.clone(), Some(album))
+        }
+        _ => (context.album_uri.clone(), context.album_key.clone(), None),
+    };
+
     // Skip actual upload if dry run
     if context.dry_run {
         return Ok(UploadStatus::DryRun { file_size });
     }
 
+    let result = upload_with_retries(
+        &context,
+        file_path,
+        &hash,
+        file_size,
+        is_raw,
+        replace_target.as_deref(),
+        &album_uri,
+        &album_key,
+    )
+    .await;
+
+    // A failed upload gives its claimed room back.
+    if let (Err(_), Some(album), Some(series)) = (&result, &claimed, &context.series) {
+        series.release(album).await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_with_retries(
+    context: &UploadWorkerContext,
+    file_path: &Path,
+    hash: &str,
+    file_size: u64,
+    is_raw: bool,
+    replace_target: Option<&str>,
+    album_uri: &str,
+    album_key: &str,
+) -> Result<UploadStatus> {
     // Upload file with retry logic
     let mut last_error = None;
     let max_attempts = context.retry_attempts.max(1); // At least 1 attempt
 
     for attempt in 1..=max_attempts {
-        let upload_attempt = match &replace_target {
+        let upload_attempt = match replace_target {
             Some(image_uri) => replace_image(&context.client, image_uri, file_path).await,
-            None => upload_image(&context.client, &context.album_uri, file_path).await,
+            None => upload_image(&context.client, album_uri, file_path).await,
         };
 
         match upload_attempt {
@@ -139,7 +187,7 @@ pub async fn upload_worker(
                 // Success! Update cache and return
                 let uploaded_file = UploadedFile {
                     smugmug_uri: upload_result.image_uri.clone(),
-                    album_key: context.album_key.clone(),
+                    album_key: album_key.to_string(),
                     image_key: upload_result.image_key.clone(),
                     uploaded_at: Utc::now(),
                     file_size,
@@ -148,7 +196,7 @@ pub async fn upload_worker(
 
                 {
                     let store = context.hash_store.lock().await;
-                    store.insert(&hash, uploaded_file)?;
+                    store.insert(hash, uploaded_file)?;
                 }
 
                 return Ok(if replace_target.is_some() {
@@ -355,6 +403,7 @@ mod tests {
             client,
             album_uri: "/api/v2/album/test".to_string(),
             album_key: "test_album".to_string(),
+            series: None,
             hash_store,
             remote_md5s: None,
             remote_images: None,
@@ -410,6 +459,7 @@ mod tests {
             client,
             album_uri: "/api/v2/album/test".to_string(),
             album_key: "test_album".to_string(),
+            series: None,
             hash_store,
             remote_md5s: None,
             remote_images: None,
@@ -454,6 +504,7 @@ mod tests {
             client,
             album_uri: "/api/v2/album/test".to_string(),
             album_key: "test_album".to_string(),
+            series: None,
             hash_store,
             remote_md5s: Some(Arc::new(remote_md5s)),
             remote_images: None,
@@ -523,6 +574,7 @@ mod tests {
             client,
             album_uri: "/api/v2/album/test".to_string(),
             album_key: "test_album".to_string(),
+            series: None,
             hash_store,
             remote_md5s: None,
             remote_images: Some(Arc::new(remote_images)),
@@ -578,6 +630,7 @@ mod tests {
             client,
             album_uri: "/api/v2/album/test".to_string(),
             album_key: "test_album".to_string(),
+            series: None,
             hash_store,
             remote_md5s: None,
             remote_images: None,
@@ -712,6 +765,7 @@ mod tests {
             client: client.clone(),
             album_uri: "/api/v2/album/ABC123".to_string(),
             album_key: "ABC123".to_string(),
+            series: None,
             hash_store: hash_store.clone(),
             remote_md5s: Some(Arc::new(remote_md5s)),
             remote_images: None,

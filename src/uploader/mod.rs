@@ -14,7 +14,7 @@ use crate::api::SmugMugClient;
 use crate::api::albums::Album;
 use crate::api::images::AlbumImage;
 use crate::cache::hash_store::HashStore;
-use album_series::AlbumBatch;
+use album_series::{AlbumSeries, ClientAlbumSeries};
 use queue::UploadQueue;
 use worker::{UploadStatus, UploadWorkerContext, upload_worker};
 // Re-exported for use in tests and examples
@@ -65,9 +65,11 @@ async fn fetch_remote_image_maps(
 }
 
 pub struct UploadOptions {
-    /// Files to upload, already assigned to albums (see
-    /// `album_series::plan_album_batches`).
-    pub batches: Vec<AlbumBatch>,
+    /// Files to upload (RAW files already filtered out if they can't be
+    /// uploaded; see `without_unsupported_raw`).
+    pub files: Vec<PathBuf>,
+    /// Albums the files go into; new images claim room album by album.
+    pub series: Arc<AlbumSeries<ClientAlbumSeries>>,
     pub client: Arc<SmugMugClient>,
     pub threads: usize,
     pub dry_run: bool,
@@ -75,7 +77,6 @@ pub struct UploadOptions {
     pub no_cache: bool,
     pub cache_path: PathBuf,
     pub retry_attempts: u32,
-    pub has_smugmug_source: bool,
 }
 
 pub struct UploadStats {
@@ -108,6 +109,25 @@ impl UploadStats {
     }
 }
 
+/// Drop RAW files when the account can't take them (RAW uploads need a
+/// SmugMug Source subscription). Returns the files to upload and how many
+/// RAW files were dropped.
+pub fn without_unsupported_raw(
+    files: Vec<PathBuf>,
+    has_smugmug_source: bool,
+) -> (Vec<PathBuf>, usize) {
+    if has_smugmug_source {
+        return (files, 0);
+    }
+    let before = files.len();
+    let kept: Vec<PathBuf> = files
+        .into_iter()
+        .filter(|f| !crate::scanner::is_raw_file(f))
+        .collect();
+    let dropped = before - kept.len();
+    (kept, dropped)
+}
+
 pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     let start_time = std::time::Instant::now();
 
@@ -117,55 +137,59 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
             .context("Failed to initialize hash store")?,
     ));
 
-    let total_files: usize = options.batches.iter().map(|b| b.files.len()).sum();
+    let total_files = options.files.len();
 
     if total_files == 0 {
         println!("No files found to upload");
         return Ok(UploadStats::empty(start_time));
     }
 
-    // Check for RAW files and warn if SmugMug Source is not enabled
-    let raw_count = options
-        .batches
-        .iter()
-        .flat_map(|b| &b.files)
-        .filter(|f| crate::scanner::is_raw_file(f))
-        .count();
-
-    if raw_count > 0 && !options.has_smugmug_source {
+    // Images already in the series' albums, so unchanged files are skipped
+    // and locally-edited files are replaced in place instead of hitting a 409
+    // (or being uploaded again into a later album of the series).
+    let mut by_filename: HashMap<String, AlbumImage> = HashMap::new();
+    let mut by_md5: HashMap<String, String> = HashMap::new();
+    let mut remote_ok = true;
+    for existing in options.series.existing_albums().await {
         println!(
-            "\n{} {}",
-            "⚠".yellow().bold(),
-            format!("Warning: {} RAW files detected", raw_count)
-                .yellow()
-                .bold()
+            "Fetching existing images from album '{}'...",
+            existing.album.name
         );
-        println!(
-            "   {}",
-            "RAW file uploads require a SmugMug Source subscription.".yellow()
-        );
-        println!(
-            "   {}",
-            "These uploads will likely fail without SmugMug Source.".yellow()
-        );
-        println!(
-            "   {}\n",
-            "(Update config with 'smugmug-cli init' if you have Source)".bright_black()
-        );
-
-        use dialoguer::Confirm;
-        let proceed = Confirm::new()
-            .with_prompt("Continue anyway?")
-            .default(false)
-            .interact()?;
-
-        if !proceed {
-            println!("{}", "Upload cancelled.".red());
-            return Ok(UploadStats::empty(start_time));
+        match fetch_remote_image_maps(
+            &options.client,
+            &existing.album.album_key,
+            options.check_remote,
+        )
+        .await
+        {
+            Ok((images, md5s)) => {
+                if let Some(images) = images {
+                    println!("Found {} existing images", images.len());
+                    by_filename.extend(images.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+                if let Some(md5s) = md5s {
+                    by_md5.extend(md5s.iter().map(|(k, v)| (k.clone(), v.clone())));
+                }
+            }
+            Err(e) => {
+                println!("Warning: Failed to fetch existing album images: {}", e);
+                remote_ok = false;
+            }
         }
     }
+    if !remote_ok {
+        println!("Continuing without remote duplicate/replace detection");
+    }
+    let (remote_images, remote_md5s) = if remote_ok {
+        (
+            Some(Arc::new(by_filename)),
+            options.check_remote.then(|| Arc::new(by_md5)),
+        )
+    } else {
+        (None, None)
+    };
 
-    println!("Found {} files to process", total_files);
+    println!("\nFound {} files to process", total_files);
 
     // Setup progress bars
     let multi_progress = MultiProgress::new();
@@ -182,81 +206,46 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     // Track statistics
     let stats = Arc::new(Mutex::new(UploadStats {
         total_files,
-        albums_created: options.batches.iter().filter(|b| b.new_album).count(),
         ..UploadStats::empty(start_time)
     }));
 
-    let skip_raw_files = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let context = Arc::new(UploadWorkerContext {
+        client: options.client.clone(),
+        album_uri: String::new(),
+        album_key: String::new(),
+        series: Some(options.series.clone()),
+        hash_store: hash_store.clone(),
+        remote_md5s,
+        remote_images,
+        dry_run: options.dry_run,
+        no_cache: options.no_cache,
+        retry_attempts: options.retry_attempts,
+        skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
 
-    for batch in options.batches {
-        if batch.files.is_empty() {
-            continue;
-        }
-
-        // Fetch existing images in the album so unchanged files are skipped
-        // and locally-edited files are replaced in place instead of hitting
-        // a 409. A new album (or a dry run's placeholder) has none.
-        let (remote_images, remote_md5s) = if batch.new_album {
-            (None, None)
-        } else {
-            overall_progress.println(format!(
-                "Fetching existing images from album '{}'...",
-                batch.album.name
-            ));
-            match fetch_remote_image_maps(
-                &options.client,
-                &batch.album.album_key,
-                options.check_remote,
-            )
-            .await
-            {
-                Ok((images, md5s)) => {
-                    if let Some(ref images) = images {
-                        overall_progress
-                            .println(format!("Found {} existing images in album", images.len()));
-                    }
-                    (images, md5s)
-                }
-                Err(e) => {
-                    overall_progress.println(format!(
-                        "Warning: Failed to fetch existing album images: {}\n\
-                         Continuing without remote duplicate/replace detection",
-                        e
-                    ));
-                    (None, None)
-                }
-            }
-        };
-
-        let context = Arc::new(UploadWorkerContext {
-            client: options.client.clone(),
-            album_uri: format!("/api/v2/album/{}", batch.album.album_key),
-            album_key: batch.album.album_key.clone(),
-            hash_store: hash_store.clone(),
-            remote_md5s,
-            remote_images,
-            dry_run: options.dry_run,
-            no_cache: options.no_cache,
-            retry_attempts: options.retry_attempts,
-            skip_raw_files: skip_raw_files.clone(),
-        });
-
-        let mut queue = UploadQueue::new();
-        for file in batch.files {
-            queue.add(file);
-        }
-
-        run_upload_workers(
-            queue,
-            context,
-            options.threads,
-            stats.clone(),
-            overall_progress.clone(),
-        )
-        .await?;
+    let mut queue = UploadQueue::new();
+    for file in options.files {
+        queue.add(file);
     }
 
+    run_upload_workers(
+        queue,
+        context,
+        options.threads,
+        stats.clone(),
+        overall_progress.clone(),
+    )
+    .await?;
+
     overall_progress.finish_with_message("Upload complete");
+
+    let albums_created = options
+        .series
+        .albums()
+        .await
+        .iter()
+        .filter(|a| a.created)
+        .count();
 
     // Return final statistics
     let final_stats = stats.lock().await;
@@ -268,7 +257,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         failed: final_stats.failed,
         total_bytes: final_stats.total_bytes,
         folders_created: 0,
-        albums_created: final_stats.albums_created,
+        albums_created,
         duration_secs: start_time.elapsed().as_secs(),
     })
 }
@@ -595,6 +584,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             client: options.client.clone(),
             album_uri: format!("/api/v2/album/{}", album.album_key),
             album_key: album.album_key.clone(),
+            series: None,
             hash_store: hash_store.clone(),
             remote_md5s,
             remote_images,
@@ -859,22 +849,6 @@ async fn find_existing_folder(
     name: &str,
     parent_node_uri: &str,
 ) -> Result<String> {
-    // Get children of the parent node
-    let children_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
-    let response = client.get_with_auth(&children_url).await?;
-
-    #[derive(serde::Deserialize)]
-    struct ChildrenResponse {
-        #[serde(rename = "Response")]
-        response: ChildrenResponseData,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ChildrenResponseData {
-        #[serde(rename = "Node")]
-        nodes: Vec<NodeInfo>,
-    }
-
     #[derive(serde::Deserialize)]
     struct NodeInfo {
         #[serde(rename = "Name")]
@@ -885,10 +859,12 @@ async fn find_existing_folder(
         uri: String,
     }
 
-    let children: ChildrenResponse = response.json().await?;
+    // Get every child of the parent node (all pages)
+    let children_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
+    let nodes: Vec<NodeInfo> = client.get_all_pages(&children_url, "Node").await?;
 
     // Find the folder with the matching name
-    for node in children.response.nodes {
+    for node in nodes {
         if node.node_type == "Folder" && node.name == name {
             return Ok(node.uri);
         }
@@ -905,48 +881,22 @@ mod tests {
     // Focuses on structure initialization, stats tracking, and thread safety
 
     #[test]
-    fn test_upload_options_creation() {
-        let client = Arc::new(SmugMugClient::new(
-            "key".to_string(),
-            "secret".to_string(),
-            "token".to_string(),
-            "token_secret".to_string(),
-        ));
+    fn test_without_unsupported_raw() {
+        let files = vec![
+            PathBuf::from("a.jpg"),
+            PathBuf::from("b.CR2"),
+            PathBuf::from("c.png"),
+            PathBuf::from("d.nef"),
+        ];
 
-        let album = Album {
-            album_key: "ABC123".to_string(),
-            name: "Test Album".to_string(),
-            url_name: "test-album".to_string(),
-            uri: "/api/v2/album/ABC123".to_string(),
-            web_uri: Some("https://example.com/album".to_string()),
-            node_id: "node123".to_string(),
-            uris: None,
-            image_count: None,
-        };
+        let (kept, dropped) = without_unsupported_raw(files.clone(), false);
+        assert_eq!(kept, vec![PathBuf::from("a.jpg"), PathBuf::from("c.png")]);
+        assert_eq!(dropped, 2);
 
-        let options = UploadOptions {
-            batches: vec![AlbumBatch {
-                album: album.clone(),
-                files: vec![PathBuf::from("/test/path/a.jpg")],
-                new_album: false,
-            }],
-            client: client.clone(),
-            threads: 4,
-            dry_run: true,
-            check_remote: false,
-            no_cache: true,
-            cache_path: PathBuf::from("/cache"),
-            retry_attempts: 3,
-            has_smugmug_source: false,
-        };
-
-        assert_eq!(options.batches.len(), 1);
-        assert_eq!(options.batches[0].album.album_key, "ABC123");
-        assert_eq!(options.threads, 4);
-        assert!(options.dry_run);
-        assert!(!options.check_remote);
-        assert!(options.no_cache);
-        assert_eq!(options.cache_path, PathBuf::from("/cache"));
+        // With SmugMug Source, RAW files stay.
+        let (kept, dropped) = without_unsupported_raw(files.clone(), true);
+        assert_eq!(kept, files);
+        assert_eq!(dropped, 0);
     }
 
     #[test]

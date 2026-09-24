@@ -181,7 +181,12 @@ inside `--parent` if given. The default folder and all auto-created albums are p
 
 **Album size limit:** SmugMug allows 5,000 photos and videos per album. When an upload would go
 past that, it continues in `Name (2)`, `Name (3)`, and so on, filling any partly-used album in
-the series first. This applies to `--album` too. (`--structure` uploads aren't split.)
+the series first. Albums are only created when a file actually needs uploading, so skipped
+duplicates never create empty albums, and a re-run skips files already in any album of the
+series. This applies to `--album` too. (`--structure` uploads aren't split.)
+
+**RAW files:** without a SmugMug Source subscription (detected by `init`/`auth`), RAW files are
+skipped with a notice instead of being uploaded and failing.
 
 ### Albums
 

@@ -25,18 +25,6 @@ pub struct AlbumImage {
     pub archived_md5: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ImagesResponse {
-    #[serde(rename = "Response")]
-    response: ImagesResponseData,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImagesResponseData {
-    #[serde(rename = "AlbumImage")]
-    images: Vec<AlbumImage>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ImageDetails {
     #[serde(rename = "ImageKey")]
@@ -93,25 +81,10 @@ pub struct ImageMetadataUpdate {
 }
 
 impl SmugMugClient {
+    /// Every image in the album, across all pages of the listing.
     pub async fn list_album_images(&self, album_key: &str) -> Result<Vec<AlbumImage>> {
         let images_url = format!("https://api.smugmug.com/api/v2/album/{}!images", album_key);
-        let oauth_header = self.build_oauth_header("GET", &images_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self.client.get(&images_url).headers(headers).send().await?;
-
-        let status = response.status();
-        let body_text = response.text().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Failed to list album images: {} - {}", status, body_text);
-        }
-
-        let images_data: ImagesResponse = serde_json::from_str(&body_text)?;
-        Ok(images_data.response.images)
+        self.get_all_pages(&images_url, "AlbumImage").await
     }
 
     pub async fn get_image_details(&self, image_key: &str) -> Result<ImageDetails> {
@@ -412,9 +385,12 @@ mod tests {
             }
         }"#;
 
-        let response: ImagesResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.response.images.len(), 1);
-        assert_eq!(response.response.images[0].image_key, "IMG123");
+        // list_album_images reads each page's Response.AlbumImage array.
+        let mut response: serde_json::Value = serde_json::from_str(json).unwrap();
+        let images: Vec<AlbumImage> =
+            serde_json::from_value(response["Response"]["AlbumImage"].take()).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].image_key, "IMG123");
     }
 
     #[tokio::test]
