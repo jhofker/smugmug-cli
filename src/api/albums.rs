@@ -5,16 +5,16 @@ use serde::{Deserialize, Serialize};
 use super::SmugMugClient;
 
 #[derive(Debug, Serialize, oauth1_request::Request)]
-struct PageQuery {
-    start: u32,
-    count: u32,
+pub(super) struct PageQuery {
+    pub(super) start: u32,
+    pub(super) count: u32,
 }
 
 /// The next page to request when walking a paginated `!children` listing:
 /// either the first page (a plain URL, no query params yet) or a later page
 /// (a base URL plus `start`/`count` params that must be signed and sent
 /// separately — see `SmugMugClient::build_oauth_header_with_query`).
-enum NextPage {
+pub(super) enum NextPage {
     First(String),
     Numbered(String, PageQuery),
 }
@@ -22,7 +22,7 @@ enum NextPage {
 /// Splits a `Pages.NextPage` value like
 /// "/api/v2/node/ABC!children?start=11&count=10" into an absolute base URL
 /// (no query string) and its `start`/`count` parameters.
-fn split_next_page(next_page: &str) -> Option<NextPage> {
+pub(super) fn split_next_page(next_page: &str) -> Option<NextPage> {
     let (path, query_str) = next_page.split_once('?')?;
     let mut start = None;
     let mut count = None;

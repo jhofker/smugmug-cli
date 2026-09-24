@@ -84,7 +84,9 @@ Cache location: `~/.cache/smugmug-cli/hash_store/`
 - **Maintain Structure** (`--structure`): Preserve directory structure as folders/albums on SmugMug
 - `--interactive` brings back the old prompt to choose between the last two
 
-Single-album and default uploads are planned into album batches by `uploader/album_series.rs`: SmugMug caps albums at 5,000 images, so files overflow into `Name (2)`, `Name (3)`, ... (`plan_album_batches`, tested against an in-memory backend). Dry runs create no folders or albums.
+Single-album and default uploads go into an album series (`uploader/album_series.rs`): SmugMug caps albums at 5,000 images, so files overflow into `Name (2)`, `Name (3)`, .... `AlbumSeries::load` finds the existing albums; each worker calls `claim()` only once a file actually needs a new upload (creating the next album on demand) and `release()` if it fails, so skipped files never create albums. Duplicate/replace detection covers every existing album in the series. Tested against an in-memory backend. Scanning and RAW filtering happen before anything touches SmugMug; dry runs create no folders or albums.
+
+`list_album_images` follows `Pages.NextPage` (100 images per page); anything reading album contents relies on that.
 
 SmugMug's Library ("All Media") would be the natural default destination, but its endpoints (`upload.smugmug.com/api/v2/library`, `/api/v2/library!assets`) return 404 to OAuth API keys as of 2026-09; `api::upload::upload_to_library` and the hidden `debug` commands are kept for when that changes.
 

@@ -1666,13 +1666,44 @@ async fn main() -> Result<()> {
             match upload_mode {
                 UploadMode::SingleAlbum => {
                     use uploader::album_series::{
-                        AlbumScope, ClientAlbumSeries, MAX_ALBUM_IMAGES, plan_album_batches,
+                        AlbumScope, AlbumSeries, ClientAlbumSeries, MAX_ALBUM_IMAGES,
                     };
 
-                    // Find or create the folder the album series lives in
-                    // (a dry run only looks). The default folder is created
-                    // private; a --parent folder keeps SmugMug's default
-                    // privacy, as before.
+                    // Work out what will actually be uploaded before touching
+                    // SmugMug at all.
+                    let files: Vec<std::path::PathBuf> =
+                        match scanner::scan_directory(std::path::Path::new(&path)) {
+                            Ok(scanned) => scanned.into_iter().map(|f| f.path).collect(),
+                            Err(e) => {
+                                println!("✗ Failed to scan {}: {}", path, e);
+                                return Ok(());
+                            }
+                        };
+                    let (files, raw_skipped) =
+                        uploader::without_unsupported_raw(files, cfg.upload.has_smugmug_source);
+                    if raw_skipped > 0 {
+                        println!(
+                            "{}",
+                            warning(&format!(
+                                "Skipping {} RAW files: RAW uploads need a SmugMug Source subscription",
+                                raw_skipped
+                            ))
+                        );
+                        println!(
+                            "  {}\n",
+                            "(Run 'smugmug-cli init' to update this if you have Source)"
+                                .bright_black()
+                        );
+                    }
+                    if files.is_empty() {
+                        println!("No files to upload.");
+                        return Ok(());
+                    }
+
+                    // Find or create the folder the albums live in (a dry run
+                    // only looks). The default folder is created private; a
+                    // --parent folder keeps SmugMug's default privacy, as
+                    // before.
                     let scope = if let Some(ref folder) = folder_path {
                         println!("Finding/creating folder path: {}", folder);
                         let privacy = if use_default_destination && parent.is_none() {
@@ -1706,69 +1737,45 @@ async fn main() -> Result<()> {
                         AlbumScope::Anywhere
                     };
 
-                    let files: Vec<std::path::PathBuf> =
-                        match scanner::scan_directory(std::path::Path::new(&path)) {
-                            Ok(scanned) => scanned.into_iter().map(|f| f.path).collect(),
-                            Err(e) => {
-                                println!("✗ Failed to scan {}: {}", path, e);
-                                return Ok(());
-                            }
-                        };
-
-                    // Spread the files over "Name", "Name (2)", ... so no
-                    // album goes over SmugMug's per-gallery limit.
+                    // The album and any overflow albums ("Name (2)", ...) are
+                    // created only when a file actually needs uploading, so
+                    // SmugMug's per-album limit is respected without making
+                    // albums that would stay empty.
                     println!("Looking up album...");
-                    let backend = ClientAlbumSeries::new(client.clone(), scope);
-                    let batches = match plan_album_batches(
-                        &backend,
+                    let series = match AlbumSeries::load(
+                        ClientAlbumSeries::new(client.clone(), scope),
                         &album_name,
-                        files,
                         MAX_ALBUM_IMAGES,
                         dry_run,
                     )
                     .await
                     {
-                        Ok(batches) => batches,
+                        Ok(series) => std::sync::Arc::new(series),
                         Err(e) => {
-                            println!("✗ Failed to find/create album: {}", e);
+                            println!("✗ Failed to look up album: {}", e);
                             return Ok(());
                         }
                     };
-
-                    for batch in &batches {
-                        let count = batch.files.len();
-                        if batch.new_album && batch.album.album_key.is_empty() {
-                            println!(
-                                "• Would create album: {} [Private] ({} files)",
-                                batch.album.name, count
-                            );
-                        } else if batch.new_album {
-                            println!(
-                                "✓ Created album: {} (Key: {}) [Private] ({} files)",
-                                batch.album.name, batch.album.album_key, count
-                            );
-                        } else {
-                            println!(
-                                "✓ Using album: {} (Key: {}) ({} files)",
-                                batch.album.name, batch.album.album_key, count
-                            );
-                        }
-                        if let Some(ref web_uri) = batch.album.web_uri {
-                            println!("  URL: {}", web_uri);
-                        }
-                    }
-                    if batches.len() > 1 {
+                    let existing = series.existing_albums().await;
+                    if existing.is_empty() {
                         println!(
-                            "  (split across {} albums: SmugMug allows {} per album)",
-                            batches.len(),
-                            MAX_ALBUM_IMAGES
+                            "• Album {} will be created when the first file uploads\n",
+                            album_name
                         );
+                    } else {
+                        for a in &existing {
+                            println!(
+                                "✓ Found album: {} (Key: {}) — {} of {} images used",
+                                a.album.name, a.album.album_key, a.count, MAX_ALBUM_IMAGES
+                            );
+                        }
+                        println!();
                     }
-                    println!();
 
                     // Set up upload options
                     let upload_options = uploader::UploadOptions {
-                        batches,
+                        files,
+                        series: series.clone(),
                         client,
                         threads,
                         dry_run,
@@ -1776,7 +1783,6 @@ async fn main() -> Result<()> {
                         no_cache,
                         cache_path,
                         retry_attempts: cfg.upload.retry_attempts,
-                        has_smugmug_source: cfg.upload.has_smugmug_source,
                     };
 
                     // Perform upload
@@ -1795,6 +1801,9 @@ async fn main() -> Result<()> {
                             );
                             println!("  {}: {}", "Replaced (modified)".cyan(), stats.replaced);
                             println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
+                            if raw_skipped > 0 {
+                                println!("  {}: {}", "Skipped (RAW)".yellow(), raw_skipped);
+                            }
                             println!("  {}: {}", "Failed".red(), stats.failed);
                             println!(
                                 "  {}: {}",
@@ -1812,6 +1821,29 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             println!("\n{}", error(&format!("Upload failed: {}", e)));
+                        }
+                    }
+
+                    // Where new images went
+                    let used: Vec<_> = series
+                        .albums()
+                        .await
+                        .into_iter()
+                        .filter(|a| a.claimed > 0 || a.created)
+                        .collect();
+                    if !used.is_empty() {
+                        println!("\n  {}:", info("Albums"));
+                        for a in used {
+                            let verb = if dry_run { "would get" } else { "got" };
+                            let status = match (a.created, dry_run) {
+                                (true, true) => " (would be created, private)",
+                                (true, false) => " (created, private)",
+                                _ => "",
+                            };
+                            println!("    {}: {} {} new{}", a.album.name, verb, a.claimed, status);
+                            if let Some(ref web_uri) = a.album.web_uri {
+                                println!("      {}", web_uri);
+                            }
                         }
                     }
                 }
