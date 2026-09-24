@@ -10,13 +10,13 @@ pub mod album_series;
 pub mod queue;
 pub mod worker;
 
+use crate::api::SmugMugClient;
 use crate::api::albums::Album;
 use crate::api::images::AlbumImage;
-use crate::api::SmugMugClient;
 use crate::cache::hash_store::HashStore;
 use album_series::AlbumBatch;
 use queue::UploadQueue;
-use worker::{upload_worker, UploadStatus, UploadWorkerContext};
+use worker::{UploadStatus, UploadWorkerContext, upload_worker};
 // Re-exported for use in tests and examples
 #[allow(unused_imports)]
 pub use worker::calculate_file_hash;

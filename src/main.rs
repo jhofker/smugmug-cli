@@ -743,7 +743,9 @@ async fn main() -> Result<()> {
                         && sort_direction.is_none()
                     {
                         println!("\n✗ No settings specified to update");
-                        println!("  Use --privacy, --description, --keywords, --sort-method, or --sort-direction");
+                        println!(
+                            "  Use --privacy, --description, --keywords, --sort-method, or --sort-direction"
+                        );
                         return Ok(());
                     }
 
@@ -1664,7 +1666,7 @@ async fn main() -> Result<()> {
             match upload_mode {
                 UploadMode::SingleAlbum => {
                     use uploader::album_series::{
-                        plan_album_batches, AlbumScope, ClientAlbumSeries, MAX_ALBUM_IMAGES,
+                        AlbumScope, ClientAlbumSeries, MAX_ALBUM_IMAGES, plan_album_batches,
                     };
 
                     // Find or create the folder the album series lives in

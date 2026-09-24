@@ -1,6 +1,6 @@
 use anyhow::Result;
 use oauth1_request as oauth;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 pub mod albums;

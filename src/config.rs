@@ -286,7 +286,7 @@ async fn browser_sign_in(
     api_secret: &str,
 ) -> Result<crate::api::oauth_flow::TokenPair> {
     use crate::api::oauth_flow::{
-        authorize_url, get_access_token, get_request_token, OAuthEndpoints,
+        OAuthEndpoints, authorize_url, get_access_token, get_request_token,
     };
 
     let endpoints = OAuthEndpoints::default();
@@ -374,10 +374,10 @@ pub async fn auth_command() -> Result<()> {
         // Same detection init does, without the interactive override.
         if let Some(user_uri) = user["Response"]["User"]["Uri"].as_str() {
             if let Ok(features) = client.get_user_features(user_uri).await {
-                config.upload.has_smugmug_source = features["Response"]["Features"]
-                    ["PremiumStorage"]
-                    .as_bool()
-                    .unwrap_or(false);
+                config.upload.has_smugmug_source =
+                    features["Response"]["Features"]["PremiumStorage"]
+                        .as_bool()
+                        .unwrap_or(false);
             }
         }
     }
@@ -502,11 +502,13 @@ cache_path = "/tmp/cache"
 
         // Deduplication defaults
         assert!(config.deduplication.enabled);
-        assert!(config
-            .deduplication
-            .cache_path
-            .to_string_lossy()
-            .ends_with("hashes.db"));
+        assert!(
+            config
+                .deduplication
+                .cache_path
+                .to_string_lossy()
+                .ends_with("hashes.db")
+        );
     }
 
     #[test]

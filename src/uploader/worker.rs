@@ -8,9 +8,9 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::api::SmugMugClient;
 use crate::api::images::AlbumImage;
 use crate::api::upload::{replace_image, upload_image};
-use crate::api::SmugMugClient;
 use crate::cache::hash_store::{HashStore, UploadedFile};
 
 pub struct UploadWorkerContext {

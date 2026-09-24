@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use super::SmugMugClient;
@@ -1213,7 +1213,7 @@ impl SmugMugClient {
 
     /// Get album download link with polling (max 10 attempts, 3s intervals)
     pub async fn get_album_download_link(&self, album_key: &str) -> Result<String> {
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
 
         // Request download
         let info = self.request_album_download(album_key).await?;

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::Mutex;
 
-use crate::api::images::AlbumImage;
 use crate::api::SmugMugClient;
+use crate::api::images::AlbumImage;
 
 pub struct DownloadOptions {
     pub album_key: String,
@@ -335,10 +335,12 @@ mod tests {
         let result = download_image(&client, &image, &temp_dir.path().to_path_buf()).await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Download failed with status: 404"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Download failed with status: 404")
+        );
 
         // Verify file was not created
         let output_path = temp_dir.path().join("error.jpg");
@@ -669,10 +671,12 @@ mod tests {
         let result = download_image(&client, &image, &temp_dir.path().to_path_buf()).await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Download failed with status: 500"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Download failed with status: 500")
+        );
 
         mock.assert_async().await;
     }

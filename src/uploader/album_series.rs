@@ -7,8 +7,8 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::api::albums::Album;
 use crate::api::SmugMugClient;
+use crate::api::albums::Album;
 
 /// SmugMug's documented maximum number of photos and videos per gallery.
 pub const MAX_ALBUM_IMAGES: u64 = 5000;
