@@ -170,7 +170,7 @@ async fn send_upload(
     // 2. Calculate MD5 checksum (base64-encoded)
     let mut context = Context::new();
     context.consume(&file_data);
-    let md5_hash = context.compute();
+    let md5_hash = context.finalize();
     let md5_base64 = general_purpose::STANDARD.encode(md5_hash.0);
 
     // 3. Determine MIME type
@@ -416,7 +416,7 @@ mod tests {
 
         let mut context = Context::new();
         context.consume(&file_data);
-        let md5_hash = context.compute();
+        let md5_hash = context.finalize();
         let md5_base64 = general_purpose::STANDARD.encode(md5_hash.0);
 
         // Verify MD5 is not empty

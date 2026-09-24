@@ -1,7 +1,8 @@
 [package]
 name = "smugmug-cli"
 version = "0.2.2"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 authors = ["Jordan Hofker <jhofker@gmail.com"]
 description = "A command-line tool for uploading photos to SmugMug with deduplication"
 license = "MIT"
@@ -18,33 +19,35 @@ path = "src/main.rs"
 
 [dependencies]
 # HTTP & API
-reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
+# native-tls (OpenSSL) rather than 0.13's default rustls/aws-lc, which needs cmake to build
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "charset", "http2", "system-proxy", "json", "multipart", "query", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1.1"
 oauth1-request = "0.6"
-hmac = "0.12"
-sha1 = "0.10"
-md5 = "0.7"
-base64 = "0.22"
+hmac = "0.13"
+sha1 = "0.11"
+md5 = "0.8"
+hex = "0.4"
+base64 = "0.23"
 
 # CLI & UX
-clap = { version = "4.5", features = ["derive", "env"] }
-indicatif = "0.17"
-colored = "2.1"
+clap = { version = "4.6", features = ["derive", "env"] }
+indicatif = "0.18"
+colored = "3.1"
 
 # Async runtime
-tokio = { version = "1.42", features = ["full"] }
-rayon = "1.10"
+tokio = { version = "1.53", features = ["full"] }
+rayon = "1.12"
 
 # File operations
 walkdir = "2.5"
-sha2 = "0.10"
+sha2 = "0.11"
 mime_guess = "2.0"
 
 # Storage
 sled = "0.34"
-directories = "5.0"
+directories = "6.0"
 
 # Error handling
 anyhow = "1.0"
@@ -53,12 +56,12 @@ thiserror = "2.0"
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
-dialoguer = "0.11"
+dialoguer = "0.12"
 dotenvy = "0.15"
 
 [dev-dependencies]
-mockito = "1.5"
-tempfile = "3.14"
+mockito = "1.7"
+tempfile = "3.27"
 tokio-test = "0.4"
 
 # The profile that 'dist' will build with
