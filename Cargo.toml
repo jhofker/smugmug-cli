@@ -13,8 +13,9 @@ keywords = ["smugmug", "photos", "upload", "cli", "deduplication"]
 categories = ["command-line-utilities", "multimedia::images"]
 # Whitelist so stray files in the working tree never end up in the published crate
 include = [
-    "src/**",
-    "tests/**",
+    "src/**/*.rs",
+    "src/**/*.md",
+    "tests/**/*.rs",
     "licenses/**",
     "Cargo.toml",
     "Cargo.lock",
