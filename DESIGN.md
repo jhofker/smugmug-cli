@@ -1,28 +1,40 @@
-# SmugMug CLI - Design Specification
+# SmugMug CLI - Design
 
 ## Overview
-A Rust-based command-line tool for uploading photos to SmugMug with deduplication and automatic album organization.
+A Rust command-line tool for uploading photos to SmugMug with deduplication and automatic album organization. It also covers the day-to-day album, image and comment management you would otherwise do in the web UI, and can download albums.
+
+See [README.md](README.md) for usage and [CLAUDE.md](CLAUDE.md) for implementation notes aimed at contributors.
 
 ## Core Features
 
-### 1. Simple Upload
-- Upload individual files or entire directories
-- Support common image formats (JPEG, PNG, HEIF, RAW, etc.)
-- Support video formats (MP4, MOV, etc.)
-- Progress tracking with multi-threaded uploads
-- Retry logic for failed uploads
+### 1. Upload
+- Upload single files or whole directories (JPEG, PNG, HEIF, RAW, video, ...)
+- Multi-threaded workers (default 4) with progress bars
+- Retries for failed uploads (`retry_attempts`, default 3)
+- `--dry-run` previews everything; it creates no folders or albums
 
 ### 2. Deduplication
-- Hash-based detection (SHA256 of file contents)
-- Check against SmugMug metadata before uploading
-- Local cache of uploaded file hashes for fast lookups
-- Skip already-uploaded files
+- SHA256 of file contents, stored in a local sled database
+- By default, a file whose name already exists in the destination album is skipped if its content is unchanged and replaced in place if it differs
+- `--check-remote` also matches existing SmugMug images by content hash regardless of filename
+- `--no-cache` bypasses the local cache
 
 ### 3. Album Organization
-- Map local folder structure to SmugMug albums/folders
-- Create albums automatically based on directory names
-- Support nested folder structures
-- Configurable album naming strategies
+- **Default destination**: a monthly album (`YYYY-MM`) in a private folder (`upload.default_folder`, default `Uploads`), or under `--parent`
+- **Single album** (`--album`): flatten everything into one album
+- **Maintain structure** (`--structure`): mirror the local directory tree as SmugMug folders and albums
+- `--interactive` prompts for single album vs. structure
+- SmugMug caps albums at 5,000 images, so uploads overflow into `Name (2)`, `Name (3)`, ... (`uploader/album_series.rs`)
+
+### 4. RAW files
+Uploading RAW originals needs a SmugMug Source subscription. `upload.raw_mode` / `--raw` chooses between `auto` (originals with Source, rendered JPEGs without), `render`, `original` and `skip`. A JPEG is rendered from the RAW's largest embedded preview (at least 1600 px on the long edge), or by converting the RAW data with `rawler`, and EXIF/GPS is copied across (`src/raw/`).
+
+### 5. Management and download
+- `albums` list/create/delete/settings/tree/download/get-download-link
+- `images` list/info/update/delete
+- `comments` list/create
+- `status` and `cache clear` for the local cache
+- A hidden `debug` command for probing raw API endpoints
 
 ## Architecture
 
@@ -30,123 +42,97 @@ A Rust-based command-line tool for uploading photos to SmugMug with deduplicatio
 ```
 smugmug-cli/
 ├── src/
-│   ├── main.rs              # CLI entry point
-│   ├── api/                 # SmugMug API client
+│   ├── main.rs              # CLI entry point and command handlers
+│   ├── lib.rs
+│   ├── config.rs            # TOML config + environment variables
+│   ├── api/                 # SmugMug API v2 client
+│   │   ├── mod.rs           # Client, OAuth 1.0a signing, paging helpers
+│   │   ├── oauth_flow.rs    # Browser-based sign-in (`auth`)
+│   │   ├── albums.rs        # Albums, folders, folder paths
+│   │   ├── images.rs        # Image metadata
+│   │   ├── comments.rs
+│   │   └── upload.rs        # Upload/replace, Library probe
+│   ├── cache/               # Local dedup state
 │   │   ├── mod.rs
-│   │   ├── auth.rs          # OAuth authentication
-│   │   ├── albums.rs        # Album management
-│   │   └── upload.rs        # Upload operations
-│   ├── cache/               # Local state management
-│   │   ├── mod.rs
-│   │   └── hash_store.rs    # Uploaded file tracking
+│   │   └── hash_store.rs    # SHA256 -> uploaded file metadata
 │   ├── scanner/             # File system scanning
 │   │   ├── mod.rs
-│   │   └── walker.rs        # Directory traversal
-│   ├── uploader/            # Upload orchestration
+│   │   └── walker.rs
+│   ├── raw/                 # RAW -> JPEG rendering
 │   │   ├── mod.rs
-│   │   ├── queue.rs         # Upload queue management
-│   │   └── worker.rs        # Upload worker threads
-│   └── config.rs            # Configuration management
-├── Dockerfile
-├── Cargo.toml
-└── README.md
+│   │   ├── jpeg.rs          # Embedded preview extraction
+│   │   └── exif.rs          # Metadata copy into the JPEG
+│   ├── uploader/            # Upload orchestration
+│   │   ├── mod.rs           # Flat and structured uploads
+│   │   ├── album_series.rs  # 5,000-image overflow planning
+│   │   ├── queue.rs
+│   │   └── worker.rs        # Per-file dedup, upload, replace
+│   └── downloader/          # Album downloads
+├── tests/                   # Integration tests (cache)
+├── licenses/                # Third-party license texts (rawler, LGPL-2.1)
+├── Dockerfile, docker-compose.yml, docker-entrypoint.sh
+├── dist-workspace.toml      # cargo-dist release config
+└── .github/workflows/       # release, docker-publish, crates-publish
 ```
 
-### Key Dependencies (Rust Crates)
+### Key Dependencies
 
-#### HTTP & API
-- `reqwest` - HTTP client with async support
-- `oauth2` - OAuth 2.0 authentication
-- `serde` / `serde_json` - JSON serialization
+- **HTTP & API**: `reqwest` (native-tls), `oauth1-request` with `hmac`/`sha1` (OAuth 1.0a), `serde`, `serde_json`, `toml`
+- **CLI & UX**: `clap` (derive), `indicatif`, `colored`, `dialoguer`
+- **Concurrency**: `tokio`, `rayon`
+- **Files**: `walkdir`, `sha2`, `md5`, `mime_guess`
+- **Storage**: `sled`, `directories`
+- **RAW**: `rawler` (LGPL-2.1, see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)), `little_exif`, `image`
+- **Errors**: `anyhow`, `thiserror`
 
-#### CLI & UX
-- `clap` - Command-line argument parsing (with derive feature)
-- `indicatif` - Progress bars
-- `colored` - Terminal colors
-
-#### Concurrency
-- `tokio` - Async runtime
-- `rayon` - Data parallelism for file scanning
-
-#### File Operations
-- `walkdir` - Directory traversal
-- `sha2` - SHA256 hashing
-- `mime_guess` - MIME type detection
-
-#### Storage
-- `sled` - Embedded database for local cache
-- `directories` - Platform-specific paths
-
-#### Error Handling
-- `anyhow` - Error handling
-- `thiserror` - Custom error types
+The minimum supported Rust version is 1.89 (required by `rawler` 0.8).
 
 ## SmugMug API Integration
 
-### Authentication Flow
-1. OAuth 2.0 three-legged authentication
-2. Store access token and refresh token securely
-3. Automatic token refresh on expiry
+### Authentication
+OAuth 1.0a, HMAC-SHA1. SmugMug access tokens do not expire, so there is no refresh flow.
 
-### API Endpoints (V2 API)
-- `/api/v2/user/{nickname}` - Get user info
-- `/api/v2/folder/{id}` - Folder operations
-- `/api/v2/node/{id}` - Node (album/folder) operations
-- `/api/v2/album/{id}` - Album management
-- `/api/v2/album/{id}!images` - Upload images
-- Upload endpoint (separate domain)
+1. `init` walks through entering API key/secret and tokens
+2. `auth` signs in through the browser to obtain or renew an access token
+3. `test-auth` verifies the stored credentials
 
-### Rate Limiting
-- Respect SmugMug rate limits
-- Implement exponential backoff
-- Configurable concurrent uploads (default: 4)
+Every request is signed in `SmugMugClient::build_oauth_header()`.
 
-## CLI Interface
+### Endpoints (API v2)
+- `/api/v2!authuser`, `/api/v2/user/{nickname}` - user info
+- `/api/v2/node/{id}` and `!children` - folders and albums as nodes
+- `/api/v2/album/{key}` and `!images` - album settings and image lists
+- `upload.smugmug.com` - image upload and replace (separate domain)
 
-### Commands
+List endpoints return one page per request; `get_all_pages` follows `Pages.NextPage` so nothing past the first page is dropped.
 
-```bash
-# Initialize configuration and authenticate
-smugmug-cli init
+SmugMug's Library ("All Media") endpoints currently return 404 to OAuth API keys, so they are not used as a destination. The code and the `debug` commands remain for when that changes.
 
-# Upload a directory
-smugmug-cli upload /path/to/photos
+### Concurrency
+Configurable worker count (default 4). Retries use `retry_attempts`; explicit rate-limit handling and exponential backoff are not implemented yet (see Future Enhancements).
 
-# Upload with options
-smugmug-cli upload /path/to/photos \
-  --threads 8 \
-  --dry-run \
-  --album "Vacation 2025"
+## Configuration
 
-# Check status of local cache
-smugmug-cli status
-
-# Clear local cache
-smugmug-cli cache clear
-```
-
-### Configuration File
-Location: `~/.config/smugmug-cli/config.toml`
+Priority: environment variables (`SMUGMUG_API_KEY`, ...), then `.env`, then `~/.config/smugmug-cli/config.toml`.
 
 ```toml
 [auth]
 api_key = "..."
 api_secret = "..."
 access_token = "..."
-refresh_token = "..."
+access_token_secret = "..."
 
 [upload]
 threads = 4
 retry_attempts = 3
 timeout_seconds = 300
+has_smugmug_source = false     # account has SmugMug Source (RAW originals)
+default_folder = "Uploads"     # where monthly albums go
+raw_mode = "auto"              # auto | render | original | skip
 
 [deduplication]
 enabled = true
 cache_path = "~/.cache/smugmug-cli/hashes.db"
-
-[album]
-create_missing = true
-naming_strategy = "folder_name"  # or "date", "custom"
 ```
 
 ## Deduplication Strategy
@@ -163,88 +149,36 @@ file_hash (SHA256) -> {
 }
 ```
 
-### Upload Decision Logic
-1. Calculate SHA256 of file
-2. Check local cache for hash
-3. If found in cache, verify image still exists in SmugMug (optional)
-4. If not in cache, upload and store hash
+### Upload Decision Logic (per file)
+1. Calculate the SHA256 of the file
+2. Check the local cache; skip if present
+3. Compare against images in the destination album (every album in the series): same name and same content is skipped, same name with different content is replaced in place
+4. With `--check-remote`, also skip content that exists under a different name
+5. Otherwise upload (creating the next album in the series only at this point), then store the hash
 
-## Docker Integration
+Rendered RAWs are cached under the RAW file's SHA256 and uploaded as `<stem>.jpg`; they are skipped, not replaced, when that name already exists.
 
-### Dockerfile Strategy
-```dockerfile
-# Multi-stage build
-FROM rust:1.75 as builder
-# Build release binary
+## Distribution
 
-FROM debian:bookworm-slim
-# Runtime with minimal dependencies
-# Copy binary
-# Add volume mounts for config and photos
-```
-
-### Docker Compose Usage
-```yaml
-services:
-  smugmug-uploader:
-    build: .
-    volumes:
-      - ./config:/root/.config/smugmug-cli
-      - /path/to/photos:/photos:ro
-    command: upload /photos --threads 8
-```
-
-## Development Phases
-
-### Phase 1: Core Infrastructure
-- [ ] Project setup with Cargo
-- [ ] CLI argument parsing with clap
-- [ ] Configuration file management
-- [ ] OAuth authentication flow
-
-### Phase 2: API Client
-- [ ] SmugMug API client structure
-- [ ] Authentication with token refresh
-- [ ] Album/folder listing and creation
-- [ ] Image upload implementation
-
-### Phase 3: File Processing
-- [ ] Directory scanner
-- [ ] File hashing
-- [ ] MIME type detection
-- [ ] Upload queue
-
-### Phase 4: Deduplication
-- [ ] Local cache (sled database)
-- [ ] Hash-based duplicate detection
-- [ ] Cache management commands
-
-### Phase 5: Polish
-- [ ] Progress bars and UX
-- [ ] Error handling and retries
-- [ ] Docker packaging
-- [ ] Documentation and README
+- **Binaries**: cargo-dist builds macOS (arm64/x64), Linux x64 and Windows x64 artifacts, shell/PowerShell installers and a Homebrew formula on version tags (`release.yml`)
+- **Docker**: multi-arch image on ghcr.io on version tags (`docker-publish.yml`); Alpine-based, drops to `PUID`/`PGID` through `docker-entrypoint.sh`
+- **crates.io**: published on version tags through trusted publishing (`crates-publish.yml`)
 
 ## Testing Strategy
 
-### Unit Tests
-- API client methods
-- Hash calculation
-- Configuration parsing
+- **Unit tests** are inline with their modules: config, cache, hashing, OAuth signing, RAW handling, album-series planning (against an in-memory backend)
+- **Integration tests** live in `tests/` (cache operations)
+- **API mocking** uses `mockito`
+- **Manual testing**: real SmugMug account, large file sets, network failures, RAW files from several camera makes
 
-### Integration Tests
-- Full upload flow (with mock API)
-- Cache operations
-- Album creation
+## Status
 
-### Manual Testing
-- Real SmugMug account testing
-- Large file sets
-- Network failure scenarios
+The original phased plan (core infrastructure, API client, file processing, deduplication, polish) is complete, and the tool is released as 0.4.0. Work since then has been monthly default albums with 5,000-image rollover, browser-based sign-in, on-demand album creation and full pagination, RAW-to-JPEG rendering, and the release pipeline.
 
 ## Future Enhancements
+- Rate-limit handling with exponential backoff
 - Watch mode for continuous sync
-- Selective sync patterns (include/exclude)
-- Download/backup from SmugMug
+- Include/exclude patterns
+- Library ("All Media") as the default destination, once SmugMug allows it for OAuth API keys
 - Web UI for monitoring
-- Metrics and logging
+- Metrics and structured logging
