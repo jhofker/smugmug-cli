@@ -13,6 +13,14 @@ A fast, reliable command-line tool for uploading photos to SmugMug with intellig
 
 ## Installation
 
+### From crates.io
+
+```bash
+cargo install smugmug-cli
+```
+
+Requires Rust 1.89 or newer.
+
 ### From Source
 
 ```bash
