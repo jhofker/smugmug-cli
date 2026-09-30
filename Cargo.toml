@@ -3,11 +3,25 @@ name = "smugmug-cli"
 version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
-authors = ["Jordan Hofker <jhofker@gmail.com"]
+authors = ["Jordan Hofker <jhofker@gmail.com>"]
 description = "A command-line tool for uploading photos to SmugMug with deduplication"
 license = "MIT"
 repository = "https://github.com/jhofker/smugmug-cli"
 homepage = "https://github.com/jhofker/smugmug-cli"
+readme = "README.md"
+keywords = ["smugmug", "photos", "upload", "cli", "deduplication"]
+categories = ["command-line-utilities", "multimedia::images"]
+# Whitelist so stray files in the working tree never end up in the published crate
+include = [
+    "src/**",
+    "tests/**",
+    "licenses/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+]
 
 [lib]
 name = "smugmug_cli"
