@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 
 use crate::api::SmugMugClient;
 use crate::api::images::AlbumImage;
-use crate::api::upload::{replace_image, upload_image};
+use crate::api::upload::{UploadPayload, replace_image, upload_image};
 use crate::cache::hash_store::{HashStore, UploadedFile};
 use crate::uploader::album_series::{AlbumSeries, ClientAlbumSeries};
 
@@ -31,6 +31,9 @@ pub struct UploadWorkerContext {
     pub dry_run: bool,
     pub no_cache: bool,
     pub retry_attempts: u32,
+    /// Upload RAW files as JPEGs rendered from them (see `crate::raw`)
+    /// instead of as originals.
+    pub render_raw: bool,
     pub skip_raw_files: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -53,9 +56,12 @@ pub async fn upload_worker(
     file_path: &Path,
     context: Arc<UploadWorkerContext>,
 ) -> Result<UploadStatus> {
-    // Check if this is a RAW file and RAW uploads are disabled
     let is_raw = crate::scanner::is_raw_file(file_path);
+    let render = is_raw && context.render_raw;
+
+    // Check if this is a RAW original and RAW uploads were found not to work
     if is_raw
+        && !render
         && context
             .skip_raw_files
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -63,7 +69,8 @@ pub async fn upload_worker(
         return Ok(UploadStatus::Skipped);
     }
 
-    // Calculate file hash (SHA256 for local cache)
+    // Calculate file hash (SHA256 for local cache). For a rendered RAW this
+    // is the RAW file's hash, so re-runs skip it without rendering again.
     let hash = calculate_file_hash(file_path).with_context(|| "Failed to calculate file hash")?;
 
     // Check local cache first (unless no_cache is enabled)
@@ -72,6 +79,10 @@ pub async fn upload_worker(
         if let Some(_cached) = store.get(&hash)? {
             return Ok(UploadStatus::Skipped);
         }
+    }
+
+    if render {
+        return upload_rendered_raw(file_path, &hash, &context).await;
     }
 
     let filename = file_path
@@ -124,29 +135,21 @@ pub async fn upload_worker(
         .with_context(|| "Failed to get file metadata")?
         .len();
 
-    // A new image in an album series claims room in the first album that has
-    // some, which may create that album. This happens only now, once the file
-    // is known to need uploading, so skipped files never use up space. On a
-    // dry run the claim is still made (without creating anything) so the
-    // summary shows where files would go.
-    let (album_uri, album_key, claimed) = match (&context.series, &replace_target) {
-        (Some(series), None) => {
-            let album = series.claim().await?;
-            (album.uri.clone(), album.album_key.clone(), Some(album))
-        }
-        _ => (context.album_uri.clone(), context.album_key.clone(), None),
-    };
+    let (album_uri, album_key, claimed) = claim_album(&context, replace_target.is_some()).await?;
 
     // Skip actual upload if dry run
     if context.dry_run {
         return Ok(UploadStatus::DryRun { file_size });
     }
 
+    let payload = UploadPayload::from_path(file_path)
+        .await
+        .with_context(|| "Failed to read file")?;
     let result = upload_with_retries(
         &context,
         file_path,
         &hash,
-        file_size,
+        &payload,
         is_raw,
         replace_target.as_deref(),
         &album_uri,
@@ -154,11 +157,92 @@ pub async fn upload_worker(
     )
     .await;
 
-    // A failed upload gives its claimed room back.
-    if let (Err(_), Some(album), Some(series)) = (&result, &claimed, &context.series) {
+    release_on_failure(&context, &result, claimed).await;
+    result
+}
+
+/// Upload a JPEG rendered from the RAW file at `file_path` (whose SHA256 is
+/// `hash`) under the RAW's name with a `.jpg` extension.
+///
+/// An image of that name already in the album counts as this file, whatever
+/// its content: it may have been rendered by an older version of this tool,
+/// and replacing it would just churn the same photo.
+async fn upload_rendered_raw(
+    file_path: &Path,
+    hash: &str,
+    context: &UploadWorkerContext,
+) -> Result<UploadStatus> {
+    let file_name = crate::raw::rendered_file_name(file_path);
+    if let Some(remote_images) = &context.remote_images
+        && remote_images.contains_key(&file_name)
+    {
+        return Ok(UploadStatus::Skipped);
+    }
+
+    // Rendering reads the whole RAW file and scans it, so keep it off the
+    // async runtime's threads.
+    let path = file_path.to_path_buf();
+    let rendered = tokio::task::spawn_blocking(move || crate::raw::render_jpeg(&path))
+        .await
+        .with_context(|| "RAW rendering task failed")?
+        .with_context(|| "Failed to render RAW file to JPEG")?;
+
+    if let Some(remote_md5s) = &context.remote_md5s
+        && remote_md5s.contains_key(&format!("{:x}", md5::compute(&rendered.data)))
+    {
+        return Ok(UploadStatus::Skipped);
+    }
+
+    let payload = UploadPayload {
+        data: rendered.data.into(),
+        file_name,
+        mime_type: "image/jpeg".to_string(),
+    };
+    let file_size = payload.data.len() as u64;
+
+    let (album_uri, album_key, claimed) = claim_album(context, false).await?;
+
+    if context.dry_run {
+        return Ok(UploadStatus::DryRun { file_size });
+    }
+
+    let result = upload_with_retries(
+        context, file_path, hash, &payload, false, None, &album_uri, &album_key,
+    )
+    .await;
+
+    release_on_failure(context, &result, claimed).await;
+    result
+}
+
+/// The album a file goes into: `context`'s album, or, for a new image in an
+/// album series, room claimed in the first album of the series that has
+/// some, which may create that album. Claims happen only once a file is
+/// known to need uploading, so skipped files never use up space. On a dry
+/// run the claim is still made (without creating anything) so the summary
+/// shows where files would go.
+async fn claim_album(
+    context: &UploadWorkerContext,
+    replacing: bool,
+) -> Result<(String, String, Option<crate::api::albums::Album>)> {
+    Ok(match (&context.series, replacing) {
+        (Some(series), false) => {
+            let album = series.claim().await?;
+            (album.uri.clone(), album.album_key.clone(), Some(album))
+        }
+        _ => (context.album_uri.clone(), context.album_key.clone(), None),
+    })
+}
+
+/// A failed upload gives its claimed room back.
+async fn release_on_failure(
+    context: &UploadWorkerContext,
+    result: &Result<UploadStatus>,
+    claimed: Option<crate::api::albums::Album>,
+) {
+    if let (Err(_), Some(album), Some(series)) = (result, &claimed, &context.series) {
         series.release(album).await;
     }
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -166,7 +250,7 @@ async fn upload_with_retries(
     context: &UploadWorkerContext,
     file_path: &Path,
     hash: &str,
-    file_size: u64,
+    payload: &UploadPayload,
     is_raw: bool,
     replace_target: Option<&str>,
     album_uri: &str,
@@ -175,11 +259,12 @@ async fn upload_with_retries(
     // Upload file with retry logic
     let mut last_error = None;
     let max_attempts = context.retry_attempts.max(1); // At least 1 attempt
+    let file_size = payload.data.len() as u64;
 
     for attempt in 1..=max_attempts {
         let upload_attempt = match replace_target {
-            Some(image_uri) => replace_image(&context.client, image_uri, file_path).await,
-            None => upload_image(&context.client, album_uri, file_path).await,
+            Some(image_uri) => replace_image(&context.client, image_uri, payload).await,
+            None => upload_image(&context.client, album_uri, payload).await,
         };
 
         match upload_attempt {
@@ -410,6 +495,7 @@ mod tests {
             dry_run: true,
             no_cache: false,
             retry_attempts: 3,
+            render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
@@ -466,6 +552,7 @@ mod tests {
             dry_run: false,
             no_cache: false,
             retry_attempts: 3,
+            render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
@@ -511,6 +598,7 @@ mod tests {
             dry_run: false,
             no_cache: false,
             retry_attempts: 3,
+            render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
@@ -581,6 +669,7 @@ mod tests {
             dry_run: false,
             no_cache: false,
             retry_attempts: 3,
+            render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
@@ -637,6 +726,7 @@ mod tests {
             dry_run: true,  // Use dry run to avoid actual upload
             no_cache: true, // This should bypass local cache
             retry_attempts: 3,
+            render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
@@ -649,6 +739,94 @@ mod tests {
             }
             _ => panic!("Expected DryRun status (cache should be bypassed)"),
         }
+    }
+
+    /// A dry-run context that renders RAW files, with `remote_names` as the
+    /// images already in the album.
+    fn render_context(remote_names: &[&str]) -> (Arc<UploadWorkerContext>, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let hash_store = Arc::new(Mutex::new(
+            HashStore::new(temp_dir.path().join("cache").to_str().unwrap()).unwrap(),
+        ));
+        let remote_images = remote_names
+            .iter()
+            .map(|name| {
+                let image = AlbumImage {
+                    image_key: "K".to_string(),
+                    file_name: name.to_string(),
+                    archived_uri: String::new(),
+                    file_size: 1,
+                    format: "JPG".to_string(),
+                    uri: "/api/v2/image/K-0".to_string(),
+                    title: None,
+                    archived_md5: Some("0".repeat(32)),
+                };
+                (name.to_string(), image)
+            })
+            .collect();
+        let context = Arc::new(UploadWorkerContext {
+            client: Arc::new(SmugMugClient::new(
+                "k".to_string(),
+                "s".to_string(),
+                "t".to_string(),
+                "ts".to_string(),
+            )),
+            album_uri: "/api/v2/album/test".to_string(),
+            album_key: "test".to_string(),
+            series: None,
+            hash_store,
+            remote_md5s: None,
+            remote_images: Some(Arc::new(remote_images)),
+            dry_run: true,
+            no_cache: false,
+            retry_attempts: 1,
+            render_raw: true,
+            skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        (context, temp_dir)
+    }
+
+    fn write_fake_raw(dir: &Path, name: &str) -> std::path::PathBuf {
+        let mut raw = crate::raw::exif::tests::fake_tiff_raw_be();
+        raw.extend(crate::raw::jpeg::tests::fake_jpeg(0xC0, 6000, 4000, None));
+        let path = dir.join(name);
+        std::fs::write(&path, raw).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn test_rendered_raw_dry_run_reports_jpeg_size() {
+        let (context, dir) = render_context(&[]);
+        let path = write_fake_raw(dir.path(), "IMG_1.NEF");
+        let expected = crate::raw::render_jpeg(&path).unwrap().data.len() as u64;
+
+        match upload_worker(&path, context).await.unwrap() {
+            UploadStatus::DryRun { file_size } => assert_eq!(file_size, expected),
+            _ => panic!("Expected DryRun status"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rendered_raw_skips_existing_jpeg_name() {
+        // Any image named like the rendered JPEG counts as this file, even
+        // with different content, so it is skipped rather than replaced.
+        let (context, dir) = render_context(&["IMG_1.jpg"]);
+        let path = write_fake_raw(dir.path(), "IMG_1.NEF");
+
+        assert!(matches!(
+            upload_worker(&path, context).await.unwrap(),
+            UploadStatus::Skipped
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_rendered_raw_without_preview_fails() {
+        let (context, dir) = render_context(&[]);
+        let path = dir.path().join("IMG_1.CR2");
+        std::fs::write(&path, crate::raw::exif::tests::fake_tiff_raw_be()).unwrap();
+
+        let err = upload_worker(&path, context).await.err().unwrap();
+        assert!(format!("{err:#}").contains("no embedded JPEG preview"));
     }
 
     #[test]
@@ -772,6 +950,7 @@ mod tests {
             dry_run: false,
             no_cache: true,
             retry_attempts: 3,
+            render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 

@@ -119,6 +119,7 @@ mod api;
 mod cache;
 mod config;
 mod downloader;
+mod raw;
 mod scanner;
 mod uploader;
 
@@ -202,6 +203,12 @@ enum Commands {
         /// Disable local cache (always check files, even if previously uploaded)
         #[arg(long)]
         no_cache: bool,
+
+        /// How to handle RAW files, overriding `raw_mode` in the config:
+        /// upload originals (needs SmugMug Source), JPEGs rendered from
+        /// their embedded previews, or nothing. Default: auto
+        #[arg(long, value_enum)]
+        raw: Option<config::RawMode>,
     },
 
     /// Show cache status and statistics
@@ -1567,8 +1574,10 @@ async fn main() -> Result<()> {
             dry_run,
             check_remote,
             no_cache,
+            raw,
         } => {
             let cfg = config::load_config()?;
+            let raw_mode = raw.unwrap_or(cfg.upload.raw_mode);
             let client = std::sync::Arc::new(api::SmugMugClient::new(
                 cfg.auth.api_key,
                 cfg.auth.api_secret,
@@ -1679,22 +1688,13 @@ async fn main() -> Result<()> {
                                 return Ok(());
                             }
                         };
-                    let (files, raw_skipped) =
-                        uploader::without_unsupported_raw(files, cfg.upload.has_smugmug_source);
-                    if raw_skipped > 0 {
-                        println!(
-                            "{}",
-                            warning(&format!(
-                                "Skipping {} RAW files: RAW uploads need a SmugMug Source subscription",
-                                raw_skipped
-                            ))
-                        );
-                        println!(
-                            "  {}\n",
-                            "(Run 'smugmug-cli init' to update this if you have Source)"
-                                .bright_black()
-                        );
-                    }
+                    let raw_handling = raw_mode.handling(cfg.upload.has_smugmug_source);
+                    let (files, raw_selection) = uploader::select_raw_files(files, raw_handling);
+                    uploader::print_raw_selection(
+                        &raw_selection,
+                        raw_mode,
+                        cfg.upload.has_smugmug_source,
+                    );
                     if files.is_empty() {
                         println!("No files to upload.");
                         return Ok(());
@@ -1775,6 +1775,7 @@ async fn main() -> Result<()> {
                     // Set up upload options
                     let upload_options = uploader::UploadOptions {
                         files,
+                        raw_handling,
                         series: series.clone(),
                         client,
                         threads,
@@ -1801,6 +1802,8 @@ async fn main() -> Result<()> {
                             );
                             println!("  {}: {}", "Replaced (modified)".cyan(), stats.replaced);
                             println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
+                            let raw_skipped =
+                                raw_selection.skipped + raw_selection.skipped_with_sibling;
                             if raw_skipped > 0 {
                                 println!("  {}: {}", "Skipped (RAW)".yellow(), raw_skipped);
                             }
@@ -1858,6 +1861,7 @@ async fn main() -> Result<()> {
                         cache_path,
                         retry_attempts: cfg.upload.retry_attempts,
                         has_smugmug_source: cfg.upload.has_smugmug_source,
+                        raw_mode,
                     })
                     .await
                     {

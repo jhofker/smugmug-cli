@@ -15,3 +15,5 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 dist = true
 # Publish jobs to run in CI
 publish-jobs = ["homebrew"]
+# Ship the LGPL notice for rawler alongside the binaries
+include = ["THIRD-PARTY-NOTICES.md", "licenses/LGPL-2.1.txt"]

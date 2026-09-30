@@ -30,6 +30,7 @@ sha1 = "0.11"
 md5 = "0.8"
 hex = "0.4"
 base64 = "0.23"
+bytes = "1"
 
 # CLI & UX
 clap = { version = "4.6", features = ["derive", "env"] }
@@ -58,6 +59,12 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2.5"
 dialoguer = "0.12"
 dotenvy = "0.15"
+
+# RAW → JPEG for accounts without SmugMug Source (src/raw/). rawler is
+# LGPL-2.1: see THIRD-PARTY-NOTICES.md. 0.8 needs Rust 1.89.
+rawler = "0.7"
+little_exif = "0.6"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
 mockito = "1.7"
