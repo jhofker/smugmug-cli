@@ -6,9 +6,15 @@
 //! GPS, orientation) copied in when the preview has none of its own. That
 //! is the camera's own rendering (picture style, white balance), without
 //! any edits made in a RAW editor, and is byte-for-byte the same each run.
+//!
+//! When a file has no usable preview (DNGs from Adobe DNG Converter often
+//! carry only a 1024 px one), the RAW data itself is converted with
+//! `rawler` (LGPL-2.1): demosaiced, white balanced and converted to sRGB,
+//! with no tone curve, so it looks flatter than the camera's rendering.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::path::Path;
+use std::sync::Mutex;
 
 pub mod exif;
 pub mod jpeg;
@@ -39,11 +45,38 @@ pub fn render_jpeg(path: &Path) -> Result<RenderedJpeg> {
     render_jpeg_bytes(&data)
 }
 
+/// JPEG quality for RAW files converted with `rawler`.
+const CONVERTED_JPEG_QUALITY: u8 = 92;
+
 pub fn render_jpeg_bytes(data: &[u8]) -> Result<RenderedJpeg> {
-    let previews = jpeg::find_jpegs(data);
-    // Largest preview; the earliest one wins a tie.
-    let Some(best) = previews
-        .iter()
+    let mut out = match embedded_preview(data) {
+        Ok(preview) if preview.has_exif => {
+            return Ok(RenderedJpeg {
+                data: data[preview.start..preview.end].to_vec(),
+            });
+        }
+        Ok(preview) => data[preview.start..preview.end].to_vec(),
+        Err(no_preview) => convert_raw(data)
+            .map_err(|e| anyhow!("{no_preview}, and converting the RAW data failed: {e:#}"))?,
+    };
+
+    // Neither a bare preview nor a converted image has the RAW's EXIF. If it
+    // can't be written, upload without it rather than not at all.
+    if let Some(exif) = exif::read_raw(data).filter(|e| !e.is_empty()) {
+        let mut with_exif = out.clone();
+        if exif.write_into_jpeg(&mut with_exif).is_ok() {
+            out = with_exif;
+        }
+    }
+
+    Ok(RenderedJpeg { data: out })
+}
+
+/// The largest JPEG preview embedded in `data` (the earliest wins a tie),
+/// if it's big enough to stand in for the photo.
+fn embedded_preview(data: &[u8]) -> Result<jpeg::EmbeddedJpeg> {
+    let Some(best) = jpeg::find_jpegs(data)
+        .into_iter()
         .reduce(|best, p| if p.pixels() > best.pixels() { p } else { best })
     else {
         bail!("no embedded JPEG preview found");
@@ -56,21 +89,37 @@ pub fn render_jpeg_bytes(data: &[u8]) -> Result<RenderedJpeg> {
             MIN_PREVIEW_LONG_EDGE
         );
     }
+    Ok(best)
+}
 
-    let preview = &data[best.start..best.end];
-    let out = if best.has_exif {
-        preview.to_vec()
-    } else {
-        match exif::read_raw(data)
-            .filter(|e| !e.is_empty())
-            .and_then(|e| e.to_app1_payload())
-        {
-            Some(payload) => exif::insert_app1(preview, &payload),
-            None => preview.to_vec(),
-        }
-    };
+/// Decode and develop the RAW data itself with `rawler`, as a JPEG.
+fn convert_raw(data: &[u8]) -> Result<Vec<u8>> {
+    use image::codecs::jpeg::JpegEncoder;
+    use rawler::decoders::RawDecodeParams;
+    use rawler::imgop::develop::RawDevelop;
+    use rawler::rawsource::RawSource;
 
-    Ok(RenderedJpeg { data: out })
+    // A developed 45 MP image takes well over a gigabyte in floating point,
+    // so conversions run one at a time however many upload workers there are.
+    static CONVERTING: Mutex<()> = Mutex::new(());
+    let _one_at_a_time = CONVERTING.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Decoders for unusual files can panic; that's a failed file, not a
+    // failed upload run.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let source = RawSource::new_from_slice(data);
+        let raw = rawler::decode(&source, &RawDecodeParams::default())?;
+        let developed = RawDevelop::default()
+            .develop_intermediate(&raw)?
+            .to_dynamic_image()
+            .context("developed image has an unexpected size")?;
+
+        let mut out = Vec::new();
+        JpegEncoder::new_with_quality(&mut out, CONVERTED_JPEG_QUALITY)
+            .encode_image(&developed.into_rgb8())?;
+        Ok(out)
+    }))
+    .map_err(|_| anyhow!("the RAW decoder crashed on this file"))?
 }
 
 #[cfg(test)]
@@ -100,9 +149,8 @@ mod tests {
 
         let rendered = render_jpeg_bytes(&raw).unwrap();
 
-        // The result is the preview with an EXIF segment right after SOI,
-        // and it parses as exactly one JPEG of the same size.
-        assert_eq!(&rendered.data[..4], &[0xFF, 0xD8, 0xFF, 0xE1]);
+        // The result is the preview with an EXIF segment added, and it
+        // parses as exactly one JPEG of the same size.
         assert!(rendered.data.ends_with(&full[2..]));
         let found = jpeg::find_jpegs(&rendered.data);
         assert_eq!(found.len(), 1);
@@ -110,9 +158,7 @@ mod tests {
         assert_eq!((found[0].width, found[0].height), (6000, 4000));
         assert_eq!(found[0].end, rendered.data.len());
 
-        let app1_len = u16::from_be_bytes([rendered.data[4], rendered.data[5]]) as usize;
-        let payload = &rendered.data[6..4 + app1_len];
-        let exif = exif::read_tiff_raw(&payload[6..]).unwrap();
+        let exif = exif::read_tiff_raw(exif::tests::exif_tiff(&rendered.data).unwrap()).unwrap();
         assert_eq!(exif.orientation(), Some(6));
 
         // Deterministic, so re-runs produce identical bytes.
@@ -130,12 +176,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_or_small_previews() {
+    fn falls_back_to_converting_without_a_usable_preview() {
+        // These fakes have no real RAW data either, so conversion fails too,
+        // and the error says why neither worked.
         let mut raw = fake_tiff_raw_be();
-        assert!(render_jpeg_bytes(&raw).is_err());
+        let err = render_jpeg_bytes(&raw).unwrap_err().to_string();
+        assert!(err.contains("no embedded JPEG preview"), "{err}");
+        assert!(err.contains("converting the RAW data failed"), "{err}");
 
         raw.extend(fake_jpeg(0xC0, 1024, 683, None));
         let err = render_jpeg_bytes(&raw).unwrap_err().to_string();
         assert!(err.contains("1024x683"), "{err}");
+        assert!(err.contains("converting the RAW data failed"), "{err}");
     }
 }

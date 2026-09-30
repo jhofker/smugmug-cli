@@ -1,10 +1,19 @@
-//! Reading a RAW file's EXIF and writing it into an EXIF (APP1) segment for
-//! the JPEG preview, which usually has none of its own.
+//! Reading a RAW file's EXIF so it can be written into the JPEG rendered
+//! from it, which usually has none of its own. Writing is `little_exif`'s
+//! job; reading is done here because RAW containers (CR3's boxes, the
+//! Olympus and Panasonic TIFF variants) are outside what it parses.
 //!
 //! Only plain values are copied: the camera/date/exposure tags of IFD0, the
 //! EXIF sub-IFD minus the MakerNote (proprietary, and full of offsets that
 //! would dangle once moved), and the GPS sub-IFD. IFD0's Orientation is kept
 //! so viewers rotate the (unrotated) preview the way the camera was held.
+
+use little_exif::endian::Endian;
+use little_exif::exif_tag::ExifTag;
+use little_exif::exif_tag_format::ExifTagFormat;
+use little_exif::filetype::FileExtension;
+use little_exif::ifd::ExifTagGroup;
+use little_exif::metadata::Metadata;
 
 /// One IFD entry with its value bytes, always in little-endian order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +56,6 @@ const IFD0_TAGS: &[u16] = &[
 /// Values bigger than this (long UserComments and the like) are dropped so
 /// the segment stays under JPEG's 64 KB segment limit.
 const MAX_VALUE_LEN: usize = 4096;
-
-const TYPE_LONG: u16 = 4;
 
 /// Size in bytes of one element of an IFD type, and the size of the units
 /// whose byte order must be swapped (rationals are pairs of 4-byte ints).
@@ -248,108 +255,30 @@ impl ExifData {
         self.ifd0.is_empty() && self.exif.is_empty() && self.gps.is_empty()
     }
 
-    /// Serialize as an APP1 payload ("Exif\0\0" and a little-endian TIFF).
-    /// `None` if it would not fit in a JPEG segment.
-    pub fn to_app1_payload(&self) -> Option<Vec<u8>> {
-        fn ifd_len(entries: &[Entry]) -> usize {
-            let data: usize = entries
-                .iter()
-                .filter(|e| e.value.len() > 4)
-                .map(|e| e.value.len() + e.value.len() % 2)
-                .sum();
-            2 + entries.len() * 12 + 4 + data
-        }
-
-        fn pointer_entry(tag: u16, offset: usize) -> Entry {
-            Entry {
-                tag,
-                typ: TYPE_LONG,
-                count: 1,
-                value: (offset as u32).to_le_bytes().to_vec(),
-            }
-        }
-
-        fn write_ifd(out: &mut Vec<u8>, entries: &[Entry]) {
-            // `out` holds the TIFF from its header on, so its length is the
-            // offset of whatever is written next.
-            let mut data_at = out.len() + 2 + entries.len() * 12 + 4;
-            let mut data = Vec::new();
-            out.extend((entries.len() as u16).to_le_bytes());
+    /// Write these tags into `jpeg` as its EXIF segment, replacing any it
+    /// has. Tags whose type doesn't match what EXIF defines for them are
+    /// left out.
+    pub fn write_into_jpeg(&self, jpeg: &mut Vec<u8>) -> std::io::Result<()> {
+        let mut metadata = Metadata::new();
+        let groups = [
+            (&self.ifd0, ExifTagGroup::GENERIC),
+            (&self.exif, ExifTagGroup::EXIF),
+            (&self.gps, ExifTagGroup::GPS),
+        ];
+        for (entries, group) in groups {
             for e in entries {
-                out.extend(e.tag.to_le_bytes());
-                out.extend(e.typ.to_le_bytes());
-                out.extend(e.count.to_le_bytes());
-                if e.value.len() <= 4 {
-                    let mut inline = e.value.clone();
-                    inline.resize(4, 0);
-                    out.extend(inline);
-                } else {
-                    out.extend((data_at as u32).to_le_bytes());
-                    data.extend(&e.value);
-                    if e.value.len() % 2 == 1 {
-                        data.push(0);
-                    }
-                    data_at += e.value.len() + e.value.len() % 2;
+                let Some(format) = ExifTagFormat::from_u16(e.typ) else {
+                    continue;
+                };
+                if let Ok(tag) =
+                    ExifTag::from_u16_with_data(e.tag, &format, &e.value, &Endian::Little, &group)
+                {
+                    metadata.set_tag(tag);
                 }
             }
-            out.extend(0u32.to_le_bytes()); // no next IFD
-            out.extend(data);
         }
-
-        let mut ifd0 = self.ifd0.clone();
-        let mut exif = self.exif.clone();
-        let mut gps = self.gps.clone();
-        for ifd in [&mut ifd0, &mut exif, &mut gps] {
-            ifd.sort_by_key(|e| e.tag);
-            ifd.dedup_by_key(|e| e.tag);
-        }
-
-        // Pointers take a fixed 12-byte slot, so IFD0's size is known before
-        // their values are.
-        let pointers = !exif.is_empty() as usize + !gps.is_empty() as usize;
-        let ifd0_len = ifd_len(&ifd0) + pointers * 12;
-        let exif_at = 8 + ifd0_len;
-        let gps_at = exif_at + if exif.is_empty() { 0 } else { ifd_len(&exif) };
-        if !exif.is_empty() {
-            ifd0.push(pointer_entry(TAG_EXIF_IFD, exif_at));
-        }
-        if !gps.is_empty() {
-            ifd0.push(pointer_entry(TAG_GPS_IFD, gps_at));
-        }
-        ifd0.sort_by_key(|e| e.tag);
-
-        let mut tiff = b"II\x2A\x00\x08\x00\x00\x00".to_vec();
-        write_ifd(&mut tiff, &ifd0);
-        if !exif.is_empty() {
-            write_ifd(&mut tiff, &exif);
-        }
-        if !gps.is_empty() {
-            write_ifd(&mut tiff, &gps);
-        }
-
-        let mut payload = b"Exif\0\0".to_vec();
-        payload.extend(tiff);
-        // The segment length field (2 bytes) counts itself.
-        (payload.len() + 2 <= u16::MAX as usize).then_some(payload)
+        metadata.write_to_vec(jpeg, FileExtension::JPEG)
     }
-}
-
-/// Insert an EXIF APP1 segment into `jpeg`: after a JFIF APP0 segment if
-/// there is one (JFIF must come first), otherwise right after SOI.
-pub fn insert_app1(jpeg: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut at = 2;
-    if jpeg.get(2..4) == Some(&[0xFF, 0xE0])
-        && let Some(len) = jpeg.get(4..6)
-    {
-        at = (4 + u16::from_be_bytes([len[0], len[1]]) as usize).min(jpeg.len());
-    }
-    let mut out = Vec::with_capacity(jpeg.len() + payload.len() + 4);
-    out.extend(&jpeg[..at]);
-    out.extend([0xFF, 0xE1]);
-    out.extend(((payload.len() + 2) as u16).to_be_bytes());
-    out.extend(payload);
-    out.extend(&jpeg[at..]);
-    out
 }
 
 #[cfg(test)]
@@ -441,14 +370,33 @@ pub(crate) mod tests {
         assert_eq!(exif.gps.len(), 1);
     }
 
-    #[test]
-    fn app1_round_trips_through_reader() {
-        let exif = read_raw(&fake_tiff_raw_be()).unwrap();
-        let payload = exif.to_app1_payload().unwrap();
-        assert!(payload.starts_with(b"Exif\0\0"));
+    /// The TIFF inside `jpeg`'s EXIF segment, found by walking its markers.
+    pub fn exif_tiff(jpeg: &[u8]) -> Option<&[u8]> {
+        let mut p = 2;
+        while jpeg.get(p) == Some(&0xFF) && jpeg.get(p + 1) != Some(&0xDA) {
+            let len = u16::from_be_bytes([*jpeg.get(p + 2)?, *jpeg.get(p + 3)?]) as usize;
+            let segment = jpeg.get(p + 4..p + 2 + len)?;
+            if jpeg[p + 1] == 0xE1 && segment.starts_with(b"Exif\0\0") {
+                return Some(&segment[6..]);
+            }
+            p += 2 + len;
+        }
+        None
+    }
 
-        // Our own reader must see the same tags in the written TIFF.
-        let reread = read_tiff_raw(&payload[6..]).unwrap();
+    #[test]
+    fn written_exif_reads_back() {
+        let exif = read_raw(&fake_tiff_raw_be()).unwrap();
+        let mut jpeg = crate::raw::jpeg::tests::fake_jpeg(0xC0, 1920, 1280, None);
+        exif.write_into_jpeg(&mut jpeg).unwrap();
+
+        // Still one well-formed JPEG, now with EXIF
+        let found = crate::raw::jpeg::find_jpegs(&jpeg);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].has_exif);
+
+        // Our own reader sees the same tags in what little_exif wrote.
+        let reread = read_tiff_raw(exif_tiff(&jpeg).unwrap()).unwrap();
         assert_eq!(reread, exif);
     }
 
@@ -478,22 +426,5 @@ pub(crate) mod tests {
         assert_eq!(exif.ifd0.len(), 2);
         assert_eq!(exif.orientation(), Some(8));
         assert!(exif.exif.is_empty());
-    }
-
-    #[test]
-    fn app1_goes_after_jfif() {
-        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0xAA, 0xBB, 0xFF, 0xD9];
-        let out = insert_app1(&jpeg, b"Exif\0\0X");
-        assert_eq!(&out[..8], &jpeg[..8]);
-        assert_eq!(&out[8..12], &[0xFF, 0xE1, 0x00, 0x09]);
-        assert_eq!(&out[12..19], b"Exif\0\0X");
-        assert_eq!(&out[19..], &[0xFF, 0xD9]);
-
-        let bare = [0xFF, 0xD8, 0xFF, 0xDB];
-        let out = insert_app1(&bare, b"E");
-        assert_eq!(
-            out,
-            vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x03, b'E', 0xFF, 0xDB]
-        );
     }
 }

@@ -60,6 +60,12 @@ url = "2.5"
 dialoguer = "0.12"
 dotenvy = "0.15"
 
+# RAW → JPEG for accounts without SmugMug Source (src/raw/). rawler is
+# LGPL-2.1: see THIRD-PARTY-NOTICES.md. 0.8 needs Rust 1.89.
+rawler = "0.7"
+little_exif = "0.6"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
 [dev-dependencies]
 mockito = "1.7"
 tempfile = "3.27"

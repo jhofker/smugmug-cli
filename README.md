@@ -200,9 +200,11 @@ GPS, orientation) copied in. Things to know:
   aren't included.
 - A RAW with a JPEG or HEIC of the same name next to it (shooting RAW+JPEG) is skipped, so
   the camera's JPEG is kept rather than replaced.
-- RAW files whose preview is smaller than 1600 px on the long edge fail rather than
-  uploading a thumbnail. This is common for DNGs made by Adobe DNG Converter with its default
-  medium-size preview.
+- When a RAW file has no preview of at least 1600 px on the long edge (common for DNGs made
+  by Adobe DNG Converter with its default medium-size preview), the RAW data itself is
+  converted instead, with [rawler](https://github.com/dnglab/dnglab). That takes a few seconds
+  and several hundred MB of memory per file (one at a time), and looks flatter than the
+  camera's rendering. Files it can't decode fail and are listed as failed.
 - A re-run skips a RAW whose `.jpg` is already in the album, without comparing contents.
 
 Set `raw_mode` in the config (or pass `--raw`) to change this: `render` always uploads JPEGs,
@@ -282,4 +284,5 @@ cargo test
 
 ## License
 
-MIT
+MIT. Release binaries also include [rawler](https://github.com/dnglab/dnglab), which is LGPL-2.1
+licensed; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

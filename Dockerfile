@@ -24,6 +24,10 @@ RUN apk add --no-cache ca-certificates libgcc su-exec
 # Copy binary from builder
 COPY --from=builder /usr/src/smugmug-cli/target/release/smugmug-cli /usr/local/bin/smugmug-cli
 
+# License notice for rawler (LGPL-2.1), which the binary includes
+COPY THIRD-PARTY-NOTICES.md /usr/share/doc/smugmug-cli/
+COPY licenses /usr/share/doc/smugmug-cli/licenses
+
 # Copy entrypoint script
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

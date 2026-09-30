@@ -61,8 +61,9 @@ smugmug-cli <command>
   - `mod.rs`: Main upload coordination, supports both flat and structured uploads
 - **src/downloader/**: Album download functionality
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
+  - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB
   - `jpeg.rs`: finds embedded JPEG previews by walking the file for well-formed JPEG streams (rejects lossless SOF3 streams, which are sensor data in CR2/DNG)
-  - `exif.rs`: reads IFD0/EXIF/GPS from TIFF-based RAWs and CR3 `CMT1/2/4` boxes and writes them as an APP1 segment for previews that have no EXIF
+  - `exif.rs`: reads IFD0/EXIF/GPS from TIFF-based RAWs and CR3 `CMT1/2/4` boxes (formats `little_exif` doesn't parse) and writes them into the JPEG with `little_exif`
 - **src/config.rs`: Configuration management (TOML file + environment variables)
 
 ### Authentication Flow
@@ -89,7 +90,7 @@ Cache location: `~/.cache/smugmug-cli/hash_store/`
 
 Single-album and default uploads go into an album series (`uploader/album_series.rs`): SmugMug caps albums at 5,000 images, so files overflow into `Name (2)`, `Name (3)`, .... `AlbumSeries::load` finds the existing albums; each worker calls `claim()` only once a file actually needs a new upload (creating the next album on demand) and `release()` if it fails, so skipped files never create albums. Duplicate/replace detection covers every existing album in the series. Tested against an in-memory backend. Scanning and RAW filtering happen before anything touches SmugMug; dry runs create no folders or albums.
 
-RAW files follow `upload.raw_mode` / `--raw` (`RawMode::handling` turns it into upload, render or skip given `has_smugmug_source`). `uploader::select_raw_files` runs before upload and drops RAWs that would render to the same name as a JPEG/HEIC next to them. Rendered RAWs are cached under the RAW file's SHA-256, uploaded as `<stem>.jpg`, and skipped (not replaced) when that name is already in the album. Rendering is pure Rust and runs in `spawn_blocking`; the preview bytes are deterministic, but don't rely on MD5 matches across versions of this code.
+RAW files follow `upload.raw_mode` / `--raw` (`RawMode::handling` turns it into upload, render or skip given `has_smugmug_source`). `uploader::select_raw_files` runs before upload and drops RAWs that would render to the same name as a JPEG/HEIC next to them. Rendered RAWs are cached under the RAW file's SHA-256, uploaded as `<stem>.jpg`, and skipped (not replaced) when that name is already in the album. Rendering runs in `spawn_blocking`; preview extraction is deterministic, but don't rely on MD5 matches across versions of this code or its dependencies.
 
 SmugMug list endpoints (`!albums`, `!images`, `!comments`, `!children`, ...) return one page per request (often 100 items, sometimes 50) with the next page in `Response.Pages.NextPage`. Read lists through `SmugMugClient::get_all_pages(url, locator)`, which follows every page; a single `get_with_auth` on a list endpoint silently drops everything after the first page. (The `!children` lookups in `albums.rs` page by hand so they can stop as soon as they find a match.)
 
