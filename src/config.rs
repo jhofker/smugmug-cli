@@ -31,6 +31,45 @@ pub struct UploadConfig {
     /// given. Created private if it doesn't exist.
     #[serde(default = "default_upload_folder")]
     pub default_folder: String,
+    /// What to do with RAW files (see `RawMode`).
+    #[serde(default)]
+    pub raw_mode: RawMode,
+}
+
+/// How `upload` treats RAW files. Uploading RAW originals needs a SmugMug
+/// Source subscription; without one, a JPEG rendered from the RAW (its
+/// embedded camera preview) can be uploaded instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum RawMode {
+    /// Upload the RAW original with SmugMug Source, otherwise a rendered JPEG
+    #[default]
+    Auto,
+    /// Always upload a rendered JPEG instead of the RAW original
+    Render,
+    /// Upload the RAW original (skipped without SmugMug Source)
+    Original,
+    /// Don't upload RAW files
+    Skip,
+}
+
+/// What actually happens to RAW files in an upload, once `RawMode` is
+/// weighed against the account's subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawHandling {
+    Upload,
+    Render,
+    Skip,
+}
+
+impl RawMode {
+    pub fn handling(self, has_smugmug_source: bool) -> RawHandling {
+        match (self, has_smugmug_source) {
+            (RawMode::Auto, true) | (RawMode::Original, true) => RawHandling::Upload,
+            (RawMode::Auto, false) | (RawMode::Render, _) => RawHandling::Render,
+            (RawMode::Original, false) | (RawMode::Skip, _) => RawHandling::Skip,
+        }
+    }
 }
 
 fn default_upload_folder() -> String {
@@ -62,6 +101,7 @@ impl Default for Config {
                 timeout_seconds: 300,
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
+                raw_mode: RawMode::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
@@ -199,7 +239,8 @@ pub async fn init_config() -> Result<()> {
                                 );
                                 println!(
                                     "  {}\n",
-                                    "RAW file uploads will not be available".bright_black()
+                                    "RAW files will be uploaded as JPEGs rendered from them"
+                                        .bright_black()
                                 );
                             }
 
@@ -453,12 +494,29 @@ mod tests {
                 timeout_seconds: 600,
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
+                raw_mode: RawMode::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
                 cache_path: PathBuf::from("/tmp/test_cache.db"),
             },
         }
+    }
+
+    #[test]
+    fn test_raw_mode_handling() {
+        assert_eq!(RawMode::Auto.handling(true), RawHandling::Upload);
+        assert_eq!(RawMode::Auto.handling(false), RawHandling::Render);
+        assert_eq!(RawMode::Render.handling(true), RawHandling::Render);
+        assert_eq!(RawMode::Original.handling(true), RawHandling::Upload);
+        assert_eq!(RawMode::Original.handling(false), RawHandling::Skip);
+        assert_eq!(RawMode::Skip.handling(true), RawHandling::Skip);
+
+        let upload: UploadConfig = toml::from_str(
+            "threads = 4\nretry_attempts = 3\ntimeout_seconds = 300\nraw_mode = \"render\"",
+        )
+        .unwrap();
+        assert_eq!(upload.raw_mode, RawMode::Render);
     }
 
     #[test]
@@ -483,6 +541,7 @@ cache_path = "/tmp/cache"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.upload.default_folder, "Uploads");
         assert_eq!(Config::default().upload.default_folder, "Uploads");
+        assert_eq!(config.upload.raw_mode, RawMode::Auto);
     }
 
     #[test]
@@ -872,6 +931,7 @@ cache_path = "/absolute/path/cache.db"
             timeout_seconds: 300,
             has_smugmug_source: false,
             default_folder: default_upload_folder(),
+            raw_mode: RawMode::default(),
         };
 
         let debug_string = format!("{:?}", upload);
@@ -906,6 +966,7 @@ cache_path = "/absolute/path/cache.db"
                 timeout_seconds: 600,
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
+                raw_mode: RawMode::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,

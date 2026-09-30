@@ -30,6 +30,7 @@ sha1 = "0.11"
 md5 = "0.8"
 hex = "0.4"
 base64 = "0.23"
+bytes = "1"
 
 # CLI & UX
 clap = { version = "4.6", features = ["derive", "env"] }

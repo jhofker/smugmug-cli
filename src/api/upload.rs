@@ -26,12 +26,41 @@ struct ImageInfo {
     image_uri: String,
 }
 
+/// A file to upload: its bytes and the name and type SmugMug records.
+#[derive(Debug, Clone)]
+pub struct UploadPayload {
+    /// Shared, so retries don't copy the file.
+    pub data: bytes::Bytes,
+    pub file_name: String,
+    pub mime_type: String,
+}
+
+impl UploadPayload {
+    /// Read the file at `file_path`, named and typed after the path.
+    pub async fn from_path(file_path: &Path) -> Result<Self> {
+        let data = fs::read(file_path).await?.into();
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let mime_type = mime_guess::from_path(file_path)
+            .first_or_octet_stream()
+            .to_string();
+        Ok(UploadPayload {
+            data,
+            file_name,
+            mime_type,
+        })
+    }
+}
+
 pub async fn upload_image(
     client: &crate::api::SmugMugClient,
     album_uri: &str,
-    file_path: &Path,
+    payload: &UploadPayload,
 ) -> Result<UploadResult> {
-    send_upload(client, "X-Smug-AlbumUri", album_uri, file_path).await
+    send_upload(client, "X-Smug-AlbumUri", album_uri, payload).await
 }
 
 /// Replace the file content of an existing image, identified by its image URI
@@ -42,9 +71,9 @@ pub async fn upload_image(
 pub async fn replace_image(
     client: &crate::api::SmugMugClient,
     image_uri: &str,
-    file_path: &Path,
+    payload: &UploadPayload,
 ) -> Result<UploadResult> {
-    send_upload(client, "X-Smug-ImageUri", image_uri, file_path).await
+    send_upload(client, "X-Smug-ImageUri", image_uri, payload).await
 }
 
 /// Upload endpoint for SmugMug's Library ("All Media"): media uploaded here
@@ -161,38 +190,28 @@ async fn send_upload(
     client: &crate::api::SmugMugClient,
     target_header: &'static str,
     target_uri: &str,
-    file_path: &Path,
+    payload: &UploadPayload,
 ) -> Result<UploadResult> {
-    // 1. Read file
-    let file_data = fs::read(file_path).await?;
+    let file_data = payload.data.clone();
     let file_size = file_data.len();
+    let mime_type = &payload.mime_type;
+    let filename = payload.file_name.as_str();
 
-    // 2. Calculate MD5 checksum (base64-encoded)
+    // 1. Calculate MD5 checksum (base64-encoded)
     let mut context = Context::new();
     context.consume(&file_data);
     let md5_hash = context.finalize();
     let md5_base64 = general_purpose::STANDARD.encode(md5_hash.0);
 
-    // 3. Determine MIME type
-    let mime_type = mime_guess::from_path(file_path)
-        .first_or_octet_stream()
-        .to_string();
-
-    // Get filename
-    let filename = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("image");
-
-    // 4. Build OAuth header for upload endpoint
+    // 2. Build OAuth header for upload endpoint
     let upload_url = "https://upload.smugmug.com/";
     let oauth_header = client.build_oauth_header("POST", upload_url);
 
-    // 5. Build headers
+    // 3. Build headers
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
     headers.insert(CONTENT_LENGTH, HeaderValue::from(file_size as u64));
-    headers.insert(CONTENT_TYPE, HeaderValue::from_str(&mime_type)?);
+    headers.insert(CONTENT_TYPE, HeaderValue::from_str(mime_type)?);
     headers.insert("Content-MD5", HeaderValue::from_str(&md5_base64)?);
     headers.insert(target_header, HeaderValue::from_str(target_uri)?);
     headers.insert("X-Smug-FileName", HeaderValue::from_str(filename)?);
@@ -201,7 +220,7 @@ async fn send_upload(
     headers.insert("X-Smug-Version", HeaderValue::from_static("v2"));
     headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-    // 6. Send POST request with file data as body
+    // 4. Send POST request with file data as body
     let http_client = reqwest::Client::new();
     let response = http_client
         .post(upload_url)
@@ -218,7 +237,7 @@ async fn send_upload(
         anyhow::bail!("Upload failed with status {}: {}", status_code, body_text);
     }
 
-    // 7. Parse response
+    // 5. Parse response
     let upload_response: UploadResponse = serde_json::from_str(&body_text)?;
 
     if upload_response.stat != "ok" {

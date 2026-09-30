@@ -14,6 +14,7 @@ use crate::api::SmugMugClient;
 use crate::api::albums::Album;
 use crate::api::images::AlbumImage;
 use crate::cache::hash_store::HashStore;
+use crate::config::{RawHandling, RawMode};
 use album_series::{AlbumSeries, ClientAlbumSeries};
 use queue::UploadQueue;
 use worker::{UploadStatus, UploadWorkerContext, upload_worker};
@@ -65,9 +66,10 @@ async fn fetch_remote_image_maps(
 }
 
 pub struct UploadOptions {
-    /// Files to upload (RAW files already filtered out if they can't be
-    /// uploaded; see `without_unsupported_raw`).
+    /// Files to upload (RAW files already selected; see `select_raw_files`).
     pub files: Vec<PathBuf>,
+    /// How the RAW files in `files` are uploaded.
+    pub raw_handling: RawHandling,
     /// Albums the files go into; new images claim room album by album.
     pub series: Arc<AlbumSeries<ClientAlbumSeries>>,
     pub client: Arc<SmugMugClient>,
@@ -109,23 +111,115 @@ impl UploadStats {
     }
 }
 
-/// Drop RAW files when the account can't take them (RAW uploads need a
-/// SmugMug Source subscription). Returns the files to upload and how many
-/// RAW files were dropped.
-pub fn without_unsupported_raw(
+/// What `select_raw_files` did with the RAW files it was given.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RawSelection {
+    /// RAW files kept, to be uploaded as JPEGs rendered from them.
+    pub rendered: usize,
+    /// RAW files left out because RAW handling is `Skip`.
+    pub skipped: usize,
+    /// RAW files left out because a JPEG or HEIC with the same name sits in
+    /// the same directory (as when shooting RAW+JPEG), or because an
+    /// earlier RAW there renders to the same name.
+    pub skipped_with_sibling: usize,
+}
+
+/// Decide which RAW files to upload, per `handling`. Non-RAW files are
+/// always kept.
+///
+/// When rendering, a RAW file `IMG_1234.CR2` becomes `IMG_1234.jpg`, which
+/// would collide with the camera's own `IMG_1234.JPG` next to it; the
+/// camera's JPEG is kept and the RAW dropped.
+pub fn select_raw_files(
     files: Vec<PathBuf>,
-    has_smugmug_source: bool,
-) -> (Vec<PathBuf>, usize) {
-    if has_smugmug_source {
-        return (files, 0);
+    handling: RawHandling,
+) -> (Vec<PathBuf>, RawSelection) {
+    use std::collections::HashSet;
+
+    let mut selection = RawSelection::default();
+    let key = |f: &PathBuf| {
+        let stem = f.file_stem().map(|s| s.to_string_lossy().to_lowercase());
+        (f.parent().map(|p| p.to_path_buf()), stem)
+    };
+
+    // Names already taken by a camera JPEG/HEIC in each directory.
+    let mut taken: HashSet<_> = HashSet::new();
+    if handling == RawHandling::Render {
+        for f in &files {
+            let ext = f
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if matches!(ext.as_str(), "jpg" | "jpeg" | "heic" | "heif") {
+                taken.insert(key(f));
+            }
+        }
     }
-    let before = files.len();
-    let kept: Vec<PathBuf> = files
+
+    let kept = files
         .into_iter()
-        .filter(|f| !crate::scanner::is_raw_file(f))
+        .filter(|f| {
+            if !crate::scanner::is_raw_file(f) {
+                return true;
+            }
+            match handling {
+                RawHandling::Upload => true,
+                RawHandling::Skip => {
+                    selection.skipped += 1;
+                    false
+                }
+                RawHandling::Render => {
+                    if taken.insert(key(f)) {
+                        selection.rendered += 1;
+                        true
+                    } else {
+                        selection.skipped_with_sibling += 1;
+                        false
+                    }
+                }
+            }
+        })
         .collect();
-    let dropped = before - kept.len();
-    (kept, dropped)
+    (kept, selection)
+}
+
+/// Tell the user what's happening to their RAW files, if anything unusual.
+pub fn print_raw_selection(selection: &RawSelection, mode: RawMode, has_smugmug_source: bool) {
+    if selection.rendered > 0 {
+        println!(
+            "{} Uploading {} RAW files as JPEGs (the preview the camera embedded in each)",
+            "•".cyan(),
+            selection.rendered
+        );
+    }
+    if selection.skipped_with_sibling > 0 {
+        println!(
+            "{} Skipping {} RAW files that have a JPEG or HEIC of the same name next to them",
+            "•".cyan(),
+            selection.skipped_with_sibling
+        );
+    }
+    if selection.skipped > 0 {
+        let reason = if mode == RawMode::Original && !has_smugmug_source {
+            "RAW originals need a SmugMug Source subscription"
+        } else {
+            "raw_mode is \"skip\""
+        };
+        println!(
+            "{}",
+            format!("⚠ Skipping {} RAW files: {}", selection.skipped, reason).yellow()
+        );
+        if mode == RawMode::Original && !has_smugmug_source {
+            println!(
+                "  {}",
+                "(Set raw_mode = \"auto\" in the config to upload JPEGs rendered from them, or run 'smugmug-cli init' if you have Source)"
+                    .bright_black()
+            );
+        }
+    }
+    if selection.rendered + selection.skipped + selection.skipped_with_sibling > 0 {
+        println!();
+    }
 }
 
 pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
@@ -220,6 +314,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         dry_run: options.dry_run,
         no_cache: options.no_cache,
         retry_attempts: options.retry_attempts,
+        render_raw: options.raw_handling == RawHandling::Render,
         skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
@@ -349,6 +444,7 @@ pub struct UploadStructureOptions {
     pub cache_path: PathBuf,
     pub retry_attempts: u32,
     pub has_smugmug_source: bool,
+    pub raw_mode: RawMode,
 }
 
 pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<UploadStats> {
@@ -364,29 +460,19 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
 
     // Walk the directory structure and build a map of folders to files
     println!("Scanning directory structure...");
-    let mut folder_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
     let mut all_files: Vec<PathBuf> = Vec::new();
 
-    fn scan_directory_recursive(
-        dir: &std::path::Path,
-        folder_map: &mut HashMap<PathBuf, Vec<PathBuf>>,
-        all_files: &mut Vec<PathBuf>,
-    ) -> Result<()> {
+    fn scan_directory_recursive(dir: &std::path::Path, all_files: &mut Vec<PathBuf>) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
 
             if path.is_dir() {
                 // Recursively scan subdirectories
-                scan_directory_recursive(&path, folder_map, all_files)?;
+                scan_directory_recursive(&path, all_files)?;
             } else if path.is_file() {
                 // Check if this is a supported file using the scanner module
                 if crate::scanner::is_supported_file(&path) {
-                    let parent = path.parent().unwrap().to_path_buf();
-                    folder_map
-                        .entry(parent)
-                        .or_insert_with(Vec::new)
-                        .push(path.clone());
                     all_files.push(path);
                 }
             }
@@ -394,55 +480,16 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
         Ok(())
     }
 
-    scan_directory_recursive(&options.path, &mut folder_map, &mut all_files)?;
+    scan_directory_recursive(&options.path, &mut all_files)?;
 
-    // Check for RAW files and warn if SmugMug Source is not enabled
-    let raw_files: Vec<_> = all_files
-        .iter()
-        .filter(|f| crate::scanner::is_raw_file(f))
-        .collect();
+    let raw_handling = options.raw_mode.handling(options.has_smugmug_source);
+    let (all_files, raw_selection) = select_raw_files(all_files, raw_handling);
+    print_raw_selection(&raw_selection, options.raw_mode, options.has_smugmug_source);
 
-    if !raw_files.is_empty() && !options.has_smugmug_source {
-        println!(
-            "\n{} {}",
-            "⚠".yellow().bold(),
-            format!("Warning: {} RAW files detected", raw_files.len())
-                .yellow()
-                .bold()
-        );
-        println!(
-            "   {}",
-            "RAW file uploads require a SmugMug Source subscription.".yellow()
-        );
-        println!(
-            "   {}",
-            "These uploads will likely fail without SmugMug Source.".yellow()
-        );
-        println!(
-            "   {}\n",
-            "(Update config with 'smugmug-cli init' if you have Source)".bright_black()
-        );
-
-        use dialoguer::Confirm;
-        let proceed = Confirm::new()
-            .with_prompt("Continue anyway?")
-            .default(false)
-            .interact()?;
-
-        if !proceed {
-            println!("{}", "Upload cancelled.".red());
-            return Ok(UploadStats {
-                total_files: 0,
-                uploaded: 0,
-                replaced: 0,
-                skipped: 0,
-                failed: 0,
-                total_bytes: 0,
-                folders_created: 0,
-                albums_created: 0,
-                duration_secs: start_time.elapsed().as_secs(),
-            });
-        }
+    let mut folder_map: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for path in all_files {
+        let parent = path.parent().unwrap().to_path_buf();
+        folder_map.entry(parent).or_default().push(path);
     }
 
     if folder_map.is_empty() {
@@ -591,6 +638,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             dry_run: options.dry_run,
             no_cache: options.no_cache,
             retry_attempts: options.retry_attempts,
+            render_raw: raw_handling == RawHandling::Render,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
 
@@ -881,7 +929,7 @@ mod tests {
     // Focuses on structure initialization, stats tracking, and thread safety
 
     #[test]
-    fn test_without_unsupported_raw() {
+    fn test_select_raw_files_upload_and_skip() {
         let files = vec![
             PathBuf::from("a.jpg"),
             PathBuf::from("b.CR2"),
@@ -889,14 +937,45 @@ mod tests {
             PathBuf::from("d.nef"),
         ];
 
-        let (kept, dropped) = without_unsupported_raw(files.clone(), false);
+        let (kept, selection) = select_raw_files(files.clone(), RawHandling::Skip);
         assert_eq!(kept, vec![PathBuf::from("a.jpg"), PathBuf::from("c.png")]);
-        assert_eq!(dropped, 2);
+        assert_eq!(selection.skipped, 2);
 
-        // With SmugMug Source, RAW files stay.
-        let (kept, dropped) = without_unsupported_raw(files.clone(), true);
+        let (kept, selection) = select_raw_files(files.clone(), RawHandling::Upload);
         assert_eq!(kept, files);
-        assert_eq!(dropped, 0);
+        assert_eq!(selection, RawSelection::default());
+    }
+
+    #[test]
+    fn test_select_raw_files_render_skips_siblings() {
+        let files = vec![
+            PathBuf::from("/p/IMG_1.CR2"),
+            PathBuf::from("/p/img_1.JPG"), // camera JPEG for IMG_1
+            PathBuf::from("/p/IMG_2.CR2"),
+            PathBuf::from("/p/IMG_2.dng"), // renders to the same name as IMG_2.CR2
+            PathBuf::from("/q/IMG_1.CR2"), // other directory, no JPEG there
+            PathBuf::from("/q/IMG_3.nef"),
+            PathBuf::from("/q/IMG_3.heic"),
+        ];
+
+        let (kept, selection) = select_raw_files(files, RawHandling::Render);
+        assert_eq!(
+            kept,
+            vec![
+                PathBuf::from("/p/img_1.JPG"),
+                PathBuf::from("/p/IMG_2.CR2"),
+                PathBuf::from("/q/IMG_1.CR2"),
+                PathBuf::from("/q/IMG_3.heic"),
+            ]
+        );
+        assert_eq!(
+            selection,
+            RawSelection {
+                rendered: 2,
+                skipped: 0,
+                skipped_with_sibling: 3,
+            }
+        );
     }
 
     #[test]
@@ -967,6 +1046,7 @@ mod tests {
             cache_path: PathBuf::from("/cache/path"),
             retry_attempts: 3,
             has_smugmug_source: false,
+            raw_mode: RawMode::Auto,
         };
 
         assert_eq!(options.path, PathBuf::from("/test/structure"));

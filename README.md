@@ -149,6 +149,9 @@ threads = 4
 retry_attempts = 3
 # Folder for monthly albums when `upload` gets no --album (created private)
 default_folder = "Uploads"
+# RAW files: "auto" (originals with SmugMug Source, otherwise rendered JPEGs),
+# "render", "original" or "skip"
+raw_mode = "auto"
 
 [deduplication]
 enabled = true
@@ -173,6 +176,7 @@ enabled = true
   - `--dry-run` - Preview what would be uploaded without uploading (creates no folders or albums)
   - `--check-remote` - Check SmugMug for existing files by MD5 hash (slower but more reliable)
   - `--no-cache` - Disable local cache (always check files, even if previously uploaded)
+  - `--raw <MODE>` - How to handle RAW files (`auto`, `render`, `original`, `skip`), overriding `raw_mode` in the config
 
 **Where files go:** with no `--album`, files go to an album named for the current month
 (e.g. `2026-09`) inside the `default_folder` from your config (`Uploads` unless changed), or
@@ -185,8 +189,24 @@ the series first. Albums are only created when a file actually needs uploading, 
 duplicates never create empty albums, and a re-run skips files already in any album of the
 series. This applies to `--album` too. (`--structure` uploads aren't split.)
 
-**RAW files:** without a SmugMug Source subscription (detected by `init`/`auth`), RAW files are
-skipped with a notice instead of being uploaded and failing.
+**RAW files:** RAW originals can only be uploaded with a SmugMug Source subscription (detected
+by `init`/`auth`). Without one, each RAW file is uploaded as a JPEG instead: the full-size
+preview the camera embedded in it, under the same name with a `.jpg` extension
+(`IMG_1234.CR2` → `IMG_1234.jpg`), with the RAW's EXIF (capture date, camera, lens, exposure,
+GPS, orientation) copied in. Things to know:
+
+- It's the camera's own rendering (picture style, white balance), not a fresh RAW
+  conversion, so edits made in Lightroom, darktable and the like (including `.xmp` sidecars)
+  aren't included.
+- A RAW with a JPEG or HEIC of the same name next to it (shooting RAW+JPEG) is skipped, so
+  the camera's JPEG is kept rather than replaced.
+- RAW files whose preview is smaller than 1600 px on the long edge fail rather than
+  uploading a thumbnail. This is common for DNGs made by Adobe DNG Converter with its default
+  medium-size preview.
+- A re-run skips a RAW whose `.jpg` is already in the album, without comparing contents.
+
+Set `raw_mode` in the config (or pass `--raw`) to change this: `render` always uploads JPEGs,
+`original` uploads RAW originals (skipped without Source), `skip` leaves RAW files out.
 
 ### Albums
 
