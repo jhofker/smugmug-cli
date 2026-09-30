@@ -2,7 +2,7 @@
 name = "smugmug-cli"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Jordan Hofker <jhofker@gmail.com>"]
 description = "A command-line tool for uploading photos to SmugMug with deduplication"
 license = "MIT"
@@ -77,7 +77,7 @@ dotenvy = "0.15"
 
 # RAW → JPEG for accounts without SmugMug Source (src/raw/). rawler is
 # LGPL-2.1: see THIRD-PARTY-NOTICES.md. 0.8 needs Rust 1.89.
-rawler = "0.7"
+rawler = "0.8"
 little_exif = "0.6"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 

@@ -1,5 +1,5 @@
 # Multi-stage build for minimal image size
-FROM rust:1.88-alpine AS builder
+FROM rust:1.89-alpine AS builder
 
 WORKDIR /usr/src/smugmug-cli
 
