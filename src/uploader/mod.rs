@@ -296,6 +296,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
     // them, and the listing above to know what the albums already hold.
     let mut files = options.files;
     let mut collected = 0;
+    let mut collect_failed = 0;
     let mut known_hashes = None;
     if remote_ok && (!options.no_cache || options.check_remote) {
         let store = hash_store.lock().await.clone();
@@ -330,6 +331,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         .await?;
         files = outcome.to_upload;
         collected = outcome.collected;
+        collect_failed = outcome.failed;
         known_hashes = Some(Arc::new(outcome.hashes));
     }
 
@@ -399,7 +401,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         replaced: final_stats.replaced,
         collected,
         skipped: final_stats.skipped,
-        failed: final_stats.failed,
+        failed: final_stats.failed + collect_failed,
         total_bytes: final_stats.total_bytes,
         folders_created: 0,
         albums_created,

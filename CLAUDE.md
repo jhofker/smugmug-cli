@@ -142,7 +142,7 @@ SmugMug doesn't deduplicate uploads: the same file uploaded to two albums become
 - A cache hit whose `album_key` isn't one of the series' albums is collected from the cached URI with no lookup.
 - With `--check-remote`, other files with an EXIF capture time are found with `image!search?Scope=<user>&DateTakenStart&DateTakenEnd` over exact times: photos within 5 minutes of each other share one search (pages are capped at 100), and matches are confirmed by `ArchivedMD5`. Files without a capture time, and rendered RAWs, are just uploaded.
 - SmugMug stores EXIF `DateTimeOriginal` as **US Pacific time** (DST-aware), ignoring `OffsetTimeOriginal` and the account's time zone; `capture_time.rs` converts the same way.
-- Collects go in batches of 100 per album and take series slots like uploads. One refused URI makes the whole request a 400 listing it under `UriProblems` (the others may still have been collected); refused cache entries are removed, the rest are collected again (it's idempotent) and refused files are uploaded.
+- Collects go in batches of 100 per album and take series slots like uploads. One refused URI makes the whole request a 400 listing it under `UriProblems` (the others may still have been collected); refused cache entries are removed, the rest are collected again (it's idempotent) and refused files are uploaded. A collect that fails outright (e.g. a 503) counts its files as failed: they're not uploaded (that would duplicate them) and their cache entries stay, so the next run retries.
 - New uploads take a few minutes to show up in search; the cache covers files from the current run.
 
 ## Common Development Patterns

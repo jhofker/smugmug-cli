@@ -109,6 +109,10 @@ pub struct CollectOutcome {
     pub collected: usize,
     /// `image!search` requests made (not counting extra pages).
     pub searches: usize,
+    /// Files that couldn't be collected because a request failed. They're
+    /// neither collected nor uploaded (that would duplicate them); their
+    /// cache entries stay, so the next run tries again.
+    pub failed: usize,
 }
 
 /// A file to collect and the image it's already on SmugMug as.
@@ -180,9 +184,10 @@ pub async fn plan_collects<C: CollectBackend, S: AlbumSeriesBackend>(
     }
 
     if !pending.is_empty() {
-        let (collected, failed) = collect_pending(pending, store, options, backend, series).await?;
-        outcome.collected = collected;
-        outcome.to_upload.extend(failed);
+        let collect = collect_pending(pending, store, options, backend, series).await?;
+        outcome.collected = collect.collected;
+        outcome.failed = collect.failed;
+        outcome.to_upload.extend(collect.refused);
     }
 
     Ok(outcome)
@@ -328,15 +333,25 @@ async fn search_bursts<C: CollectBackend>(
     (found, not_found, searches)
 }
 
+/// How collecting went.
+#[derive(Default)]
+struct Collected {
+    collected: usize,
+    /// Files SmugMug refused to collect (the image is gone or can't be
+    /// collected), to upload instead.
+    refused: Vec<PathBuf>,
+    /// Files not collected because a request failed.
+    failed: usize,
+}
+
 /// Claim room for each file in the series and collect them album by album.
-/// Returns how many were collected and the files to upload instead.
 async fn collect_pending<C: CollectBackend, S: AlbumSeriesBackend>(
     pending: Vec<Pending>,
     store: &HashStore,
     options: &CollectOptions,
     backend: &C,
     series: &AlbumSeries<S>,
-) -> Result<(usize, Vec<PathBuf>)> {
+) -> Result<Collected> {
     // Group by album, keeping the series' order.
     let mut groups: Vec<(Album, Vec<Pending>)> = Vec::new();
     for p in pending {
@@ -349,61 +364,93 @@ async fn collect_pending<C: CollectBackend, S: AlbumSeriesBackend>(
 
     let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
     if options.dry_run {
-        return Ok((total, Vec::new()));
+        return Ok(Collected {
+            collected: total,
+            ..Default::default()
+        });
     }
 
     println!("Adding {} files already on SmugMug to the album...", total);
-    let mut collected = 0;
-    let mut to_upload = Vec::new();
+    let mut outcome = Collected::default();
     for (album, members) in groups {
         let mut members = members.into_iter().peekable();
         while members.peek().is_some() {
             let batch: Vec<Pending> = members.by_ref().take(COLLECT_BATCH).collect();
-            let (done, failed) = collect_batch(batch, &album, store, backend).await;
-            collected += done;
-            for p in failed {
+            let batch = collect_batch(batch, &album, store, backend).await;
+            outcome.collected += batch.collected;
+            for _ in 0..batch.refused.len() + batch.failed.len() {
                 series.release(&album).await;
-                to_upload.push(p.path);
             }
+            outcome
+                .refused
+                .extend(batch.refused.into_iter().map(|p| p.path));
+            outcome.failed += batch.failed.len();
         }
     }
-    Ok((collected, to_upload))
+
+    if !outcome.refused.is_empty() {
+        println!(
+            "{}",
+            format!(
+                "⚠ SmugMug refused to add {} files (no longer there?); uploading them instead",
+                outcome.refused.len()
+            )
+            .yellow()
+        );
+    }
+    if outcome.failed > 0 {
+        println!(
+            "{}",
+            format!(
+                "⚠ {} files couldn't be added from SmugMug; run the upload again to retry",
+                outcome.failed
+            )
+            .yellow()
+        );
+    }
+    Ok(outcome)
+}
+
+/// How one batch went.
+struct BatchOutcome {
+    collected: usize,
+    refused: Vec<Pending>,
+    failed: Vec<Pending>,
 }
 
 /// Collect one batch into `album`, recording each collected file in the
-/// cache. Returns how many were collected and the ones that weren't.
+/// cache.
 async fn collect_batch<C: CollectBackend>(
     batch: Vec<Pending>,
     album: &Album,
     store: &HashStore,
     backend: &C,
-) -> (usize, Vec<Pending>) {
+) -> BatchOutcome {
     let uris: Vec<String> = batch.iter().map(|p| p.image_uri.clone()).collect();
-    let (mut good, mut failed): (Vec<Pending>, Vec<Pending>) =
-        match backend.collect(&album.album_key, &uris).await {
-            Ok(result) if result.rejected.is_empty() => (batch, Vec::new()),
-            Ok(result) => {
-                let (rejected, good): (Vec<Pending>, Vec<Pending>) = batch
-                    .into_iter()
-                    .partition(|p| result.rejected.contains_key(&p.image_uri));
-                for p in &rejected {
-                    // The cache points at an image that's gone or unusable;
-                    // forget it so the worker uploads the file.
-                    if p.from_cache {
-                        let _ = store.remove(&p.hash);
-                    }
-                }
-                (good, rejected)
-            }
-            Err(e) => {
-                println!("Warning: Couldn't add files to '{}': {}", album.name, e);
-                (Vec::new(), batch)
-            }
-        };
+    let (mut good, refused) = match backend.collect(&album.album_key, &uris).await {
+        Ok(result) => batch
+            .into_iter()
+            .partition::<Vec<Pending>, _>(|p| !result.rejected.contains_key(&p.image_uri)),
+        Err(e) => {
+            println!("Warning: Couldn't add files to '{}': {}", album.name, e);
+            return BatchOutcome {
+                collected: 0,
+                refused: Vec::new(),
+                failed: batch,
+            };
+        }
+    };
+
+    // The cache points at an image that's gone or unusable: forget it, so
+    // the worker uploads the file instead of skipping it as a duplicate.
+    for p in refused.iter().filter(|p| p.from_cache) {
+        let _ = store.remove(&p.hash);
+    }
 
     // A refused URI fails the whole request, though SmugMug may have
     // collected the others; collecting them again settles it.
-    if !failed.is_empty() && !good.is_empty() {
+    let mut failed = Vec::new();
+    if !refused.is_empty() && !good.is_empty() {
         let uris: Vec<String> = good.iter().map(|p| p.image_uri.clone()).collect();
         match backend.collect(&album.album_key, &uris).await {
             Ok(result) if result.rejected.is_empty() => {}
@@ -429,17 +476,11 @@ async fn collect_batch<C: CollectBackend>(
             },
         );
     }
-    if !failed.is_empty() {
-        println!(
-            "{}",
-            format!(
-                "⚠ {} files couldn't be added from SmugMug and will be uploaded",
-                failed.len()
-            )
-            .yellow()
-        );
+    BatchOutcome {
+        collected: good.len(),
+        refused,
+        failed,
     }
-    (good.len(), failed)
 }
 
 #[cfg(test)]
@@ -457,6 +498,8 @@ mod tests {
         /// URIs `collect` refuses ("Does not exist").
         missing: HashSet<String>,
         fail_collect: bool,
+        /// Fail every collect after the first.
+        fail_on_retry: bool,
         searches: StdMutex<Vec<(DateTime<Utc>, DateTime<Utc>)>>,
         /// (album key, URIs) per collect call.
         collects: StdMutex<Vec<(String, Vec<String>)>>,
@@ -502,7 +545,8 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((album_key.to_string(), uris.to_vec()));
-            if self.fail_collect {
+            let calls = self.collects.lock().unwrap().len();
+            if self.fail_collect || (self.fail_on_retry && calls > 1) {
                 anyhow::bail!("503 Service Unavailable");
             }
             let rejected = uris
@@ -809,6 +853,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.collected, 1);
+        assert_eq!(outcome.failed, 0);
         assert_eq!(outcome.to_upload, vec![a.clone()]);
         assert!(s.store.get(&outcome.hashes[&a]).unwrap().is_none());
         // The refused file's room went back.
@@ -820,7 +865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_collect_uploads_instead() {
+    async fn test_failed_collect_fails_without_uploading_or_forgetting() {
         let s = setup();
         let a = photo(s.dir.path(), "a.jpg", "a", None);
         cached(&s.store, &a, "key-Other", "AAA");
@@ -841,8 +886,47 @@ mod tests {
         .await
         .unwrap();
 
+        // Not uploaded (it's on SmugMug; that would duplicate it) and not
+        // forgotten, so the next run tries again; reported as failed.
         assert_eq!(outcome.collected, 0);
-        assert_eq!(outcome.to_upload, vec![a]);
+        assert_eq!(outcome.failed, 1);
+        assert!(outcome.to_upload.is_empty());
+        assert!(s.store.get(&outcome.hashes[&a]).unwrap().is_some());
+        assert_eq!(series.albums().await[0].claimed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_failed_retry_after_refusal_counts_as_failed() {
+        let s = setup();
+        let a = photo(s.dir.path(), "a.jpg", "a", None);
+        let b = photo(s.dir.path(), "b.jpg", "b", None);
+        cached(&s.store, &a, "key-Other", "GONE");
+        cached(&s.store, &b, "key-Other", "BBB");
+        let smugmug = FakeSmugMug {
+            missing: HashSet::from(["/api/v2/image/GONE-0".to_string()]),
+            fail_on_retry: true,
+            ..Default::default()
+        };
+        let series = series(&[("Trip", 0)], MAX_ALBUM_IMAGES).await;
+
+        let outcome = plan_collects(
+            vec![a.clone(), b.clone()],
+            &empty_target(),
+            &s.store,
+            &options(false),
+            &smugmug,
+            &series,
+        )
+        .await
+        .unwrap();
+
+        // a was refused: uploaded, and its stale entry forgotten. b's retry
+        // failed: kept for the next run.
+        assert_eq!(outcome.collected, 0);
+        assert_eq!(outcome.to_upload, vec![a.clone()]);
+        assert_eq!(outcome.failed, 1);
+        assert!(s.store.get(&outcome.hashes[&a]).unwrap().is_none());
+        assert!(s.store.get(&outcome.hashes[&b]).unwrap().is_some());
         assert_eq!(series.albums().await[0].claimed, 0);
     }
 
