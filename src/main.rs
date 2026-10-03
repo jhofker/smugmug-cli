@@ -196,9 +196,7 @@ enum Commands {
         /// Also match existing SmugMug images by content hash regardless of
         /// filename, to skip re-uploading the same content under a
         /// different name (in addition to the default same-filename
-        /// skip/replace behavior, which always runs). Photos already
-        /// elsewhere in the account (found by capture time and content) are
-        /// added to the album instead of uploaded again
+        /// skip/replace behavior, which always runs)
         #[arg(long)]
         check_remote: bool,
 

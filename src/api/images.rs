@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -72,27 +71,6 @@ struct ImageDetailsResponseData {
     #[serde(rename = "Image")]
     image: ImageDetails,
 }
-
-/// An image found by `image!search`.
-#[derive(Debug, Deserialize, Clone)]
-pub struct SearchImage {
-    #[serde(rename = "ImageKey")]
-    pub image_key: String,
-    /// `/api/v2/image/KEY-0`, which `collect_images` accepts.
-    #[serde(rename = "Uri")]
-    pub uri: String,
-    #[serde(rename = "ArchivedMD5")]
-    pub archived_md5: Option<String>,
-    /// False for images that can't be added to another album.
-    #[serde(rename = "Collectable", default = "default_true")]
-    pub collectable: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-pub const IMAGE_SEARCH_URL: &str = "https://api.smugmug.com/api/v2/image!search";
 
 /// SmugMug's answer to a `collect_images` call.
 #[derive(Debug, Default, PartialEq)]
@@ -198,38 +176,6 @@ impl SmugMugClient {
         }
 
         Ok(())
-    }
-
-    /// Every image in `scope` (a user, folder or album URI) whose capture
-    /// time (`DateTimeOriginal` as SmugMug stores it, see
-    /// `uploader::capture_time`) is within `start..=end`, to the second.
-    pub async fn search_images_taken_between(
-        &self,
-        scope: &str,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<Vec<SearchImage>> {
-        self.search_images_taken_between_at(IMAGE_SEARCH_URL, scope, start, end)
-            .await
-    }
-
-    async fn search_images_taken_between_at(
-        &self,
-        search_url: &str,
-        scope: &str,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<Vec<SearchImage>> {
-        let format = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let url = reqwest::Url::parse_with_params(
-            search_url,
-            &[
-                ("Scope", scope.to_string()),
-                ("DateTakenStart", format(start)),
-                ("DateTakenEnd", format(end)),
-            ],
-        )?;
-        self.get_all_pages(url.as_str(), "Image").await
     }
 
     /// Add existing images (Image or AlbumImage URIs) to the album, without
@@ -1169,56 +1115,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("400"));
-    }
-
-    #[tokio::test]
-    async fn test_search_images_taken_between_sends_exact_range_and_pages() {
-        let client = create_test_client();
-        let mut server = mockito::Server::new_async().await;
-        let first = server
-            .mock("GET", "/api/v2/image!search")
-            .match_query(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded("Scope".into(), "/api/v2/user/me".into()),
-                mockito::Matcher::UrlEncoded("DateTakenStart".into(), "2026-05-01T19:00:00Z".into()),
-                mockito::Matcher::UrlEncoded("DateTakenEnd".into(), "2026-05-01T19:03:00Z".into()),
-            ]))
-            .with_status(200)
-            .with_body(
-                r#"{"Response":{"Image":[
-                    {"ImageKey":"A","FileName":"a.jpg","Uri":"/api/v2/image/A-0","ArchivedMD5":"aa","Collectable":true}],
-                  "Pages":{"NextPage":"/api/v2/image!search?start=2&count=1"}}}"#,
-            )
-            .create_async()
-            .await;
-        let second = server
-            .mock("GET", "/api/v2/image!search")
-            .match_query(mockito::Matcher::UrlEncoded("start".into(), "2".into()))
-            .with_status(200)
-            .with_body(
-                r#"{"Response":{"Image":[
-                    {"ImageKey":"B","FileName":"b.jpg","Uri":"/api/v2/image/B-0","Collectable":false}],
-                  "Pages":{}}}"#,
-            )
-            .create_async()
-            .await;
-
-        let utc = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().to_utc();
-        let images = client
-            .search_images_taken_between_at(
-                &format!("{}/api/v2/image!search", server.url()),
-                "/api/v2/user/me",
-                utc("2026-05-01T19:00:00Z"),
-                utc("2026-05-01T19:03:00Z"),
-            )
-            .await
-            .unwrap();
-
-        first.assert_async().await;
-        second.assert_async().await;
-        assert_eq!(images.len(), 2);
-        assert_eq!(images[0].archived_md5.as_deref(), Some("aa"));
-        assert!(images[0].collectable);
-        assert!(images[1].archived_md5.is_none());
-        assert!(!images[1].collectable);
     }
 }

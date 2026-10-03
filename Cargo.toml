@@ -71,7 +71,6 @@ thiserror = "2.0"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
 url = "2.5"
 dialoguer = "0.12"
 dotenvy = "0.15"

@@ -363,7 +363,7 @@ pub fn calculate_file_hash(file_path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-pub(crate) fn calculate_md5_hash(file_path: &Path) -> Result<String> {
+fn calculate_md5_hash(file_path: &Path) -> Result<String> {
     let file = File::open(file_path)?;
     let mut reader = BufReader::new(file);
     let mut context = Md5Context::new();

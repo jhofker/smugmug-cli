@@ -7,7 +7,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub mod album_series;
-pub mod capture_time;
 pub mod collect;
 pub mod queue;
 pub mod worker;
@@ -291,14 +290,14 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
 
     println!("\nFound {} files to process", total_files);
 
-    // Files already on SmugMug in other albums are collected into the series
-    // instead of uploaded again. Needs the cache or --check-remote to find
-    // them, and the listing above to know what the albums already hold.
+    // Files the cache knows are in other albums are collected into the series
+    // (the workers would skip them as duplicates). Needs the listing above to
+    // know what the albums already hold.
     let mut files = options.files;
     let mut collected = 0;
     let mut collect_failed = 0;
     let mut known_hashes = None;
-    if remote_ok && (!options.no_cache || options.check_remote) {
+    if remote_ok && !options.no_cache {
         let store = hash_store.lock().await.clone();
         let target = collect::TargetContents {
             album_keys: options
@@ -312,19 +311,12 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
                 .iter()
                 .flat_map(|images| images.keys().map(String::as_str))
                 .collect(),
-            md5s: remote_md5s.as_deref(),
-        };
-        let collect_options = collect::CollectOptions {
-            use_cache: !options.no_cache,
-            search: options.check_remote,
-            render_raw: options.raw_handling == RawHandling::Render,
-            dry_run: options.dry_run,
         };
         let outcome = collect::plan_collects(
             files,
             &target,
             &store,
-            &collect_options,
+            options.dry_run,
             options.client.as_ref(),
             options.series.as_ref(),
         )
