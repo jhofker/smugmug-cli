@@ -7,6 +7,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub mod album_series;
+pub mod capture_time;
+pub mod collect;
 pub mod queue;
 pub mod worker;
 
@@ -87,6 +89,9 @@ pub struct UploadStats {
     /// Files that replaced an existing, differently-content image with the
     /// same filename already in the album.
     pub replaced: usize,
+    /// Files already on SmugMug that were added to the album instead of
+    /// uploaded again (see `collect`).
+    pub collected: usize,
     pub skipped: usize,
     pub failed: usize,
     pub total_bytes: u64,
@@ -101,6 +106,7 @@ impl UploadStats {
             total_files: 0,
             uploaded: 0,
             replaced: 0,
+            collected: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -285,9 +291,51 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
 
     println!("\nFound {} files to process", total_files);
 
+    // Files already on SmugMug in other albums are collected into the series
+    // instead of uploaded again. Needs the cache or --check-remote to find
+    // them, and the listing above to know what the albums already hold.
+    let mut files = options.files;
+    let mut collected = 0;
+    let mut known_hashes = None;
+    if remote_ok && (!options.no_cache || options.check_remote) {
+        let store = hash_store.lock().await.clone();
+        let target = collect::TargetContents {
+            album_keys: options
+                .series
+                .existing_albums()
+                .await
+                .into_iter()
+                .map(|a| a.album.album_key)
+                .collect(),
+            file_names: remote_images
+                .iter()
+                .flat_map(|images| images.keys().map(String::as_str))
+                .collect(),
+            md5s: remote_md5s.as_deref(),
+        };
+        let collect_options = collect::CollectOptions {
+            use_cache: !options.no_cache,
+            search: options.check_remote,
+            render_raw: options.raw_handling == RawHandling::Render,
+            dry_run: options.dry_run,
+        };
+        let outcome = collect::plan_collects(
+            files,
+            &target,
+            &store,
+            &collect_options,
+            options.client.as_ref(),
+            options.series.as_ref(),
+        )
+        .await?;
+        files = outcome.to_upload;
+        collected = outcome.collected;
+        known_hashes = Some(Arc::new(outcome.hashes));
+    }
+
     // Setup progress bars
     let multi_progress = MultiProgress::new();
-    let overall_progress = multi_progress.add(ProgressBar::new(total_files as u64));
+    let overall_progress = multi_progress.add(ProgressBar::new(files.len() as u64));
     overall_progress.set_style(
         ProgressStyle::default_bar()
             .template(
@@ -316,10 +364,11 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         retry_attempts: options.retry_attempts,
         render_raw: options.raw_handling == RawHandling::Render,
         skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        known_hashes,
     });
 
     let mut queue = UploadQueue::new();
-    for file in options.files {
+    for file in files {
         queue.add(file);
     }
 
@@ -348,6 +397,7 @@ pub async fn upload_files(options: UploadOptions) -> Result<UploadStats> {
         total_files: final_stats.total_files,
         uploaded: final_stats.uploaded,
         replaced: final_stats.replaced,
+        collected,
         skipped: final_stats.skipped,
         failed: final_stats.failed,
         total_bytes: final_stats.total_bytes,
@@ -498,6 +548,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             total_files: 0,
             uploaded: 0,
             replaced: 0,
+            collected: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -520,6 +571,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
         total_files,
         uploaded: 0,
         replaced: 0,
+        collected: 0,
         skipped: 0,
         failed: 0,
         total_bytes: 0,
@@ -640,6 +692,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
             retry_attempts: options.retry_attempts,
             render_raw: raw_handling == RawHandling::Render,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         });
 
         // Upload files in this folder
@@ -696,6 +749,7 @@ pub async fn upload_with_structure(options: UploadStructureOptions) -> Result<Up
         total_files: final_stats.total_files,
         uploaded: final_stats.uploaded,
         replaced: final_stats.replaced,
+        collected: 0,
         skipped: final_stats.skipped,
         failed: final_stats.failed,
         total_bytes: final_stats.total_bytes,
@@ -984,6 +1038,7 @@ mod tests {
             total_files: 10,
             uploaded: 0,
             replaced: 0,
+            collected: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -1007,6 +1062,7 @@ mod tests {
             total_files: 10,
             uploaded: 0,
             replaced: 0,
+            collected: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -1109,6 +1165,7 @@ mod tests {
             total_files: 100,
             uploaded: 0,
             replaced: 0,
+            collected: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -1148,6 +1205,7 @@ mod tests {
             total_files: 0,
             uploaded: 0,
             replaced: 0,
+            collected: 0,
             skipped: 0,
             failed: 0,
             total_bytes: 0,
@@ -1166,6 +1224,7 @@ mod tests {
             total_files: 10000,
             uploaded: 8500,
             replaced: 0,
+            collected: 0,
             skipped: 1200,
             failed: 300,
             total_bytes: 50_000_000_000, // 50GB
@@ -1253,6 +1312,7 @@ mod tests {
             total_files: 100,
             uploaded: 70,
             replaced: 0,
+            collected: 0,
             skipped: 20,
             failed: 10,
             total_bytes: 1_073_741_824, // 1GB

@@ -196,7 +196,9 @@ enum Commands {
         /// Also match existing SmugMug images by content hash regardless of
         /// filename, to skip re-uploading the same content under a
         /// different name (in addition to the default same-filename
-        /// skip/replace behavior, which always runs)
+        /// skip/replace behavior, which always runs). Photos already
+        /// elsewhere in the account (found by capture time and content) are
+        /// added to the album instead of uploaded again
         #[arg(long)]
         check_remote: bool,
 
@@ -317,6 +319,10 @@ enum DebugCommands {
         /// HTTP method to send instead of GET (e.g. OPTIONS)
         #[arg(short = 'X', long, default_value = "GET")]
         method: String,
+
+        /// JSON body to send (e.g. for -X POST)
+        #[arg(short, long)]
+        data: Option<String>,
     },
 
     /// Upload one file to the Library (no album); prints status and raw JSON
@@ -1801,6 +1807,13 @@ async fn main() -> Result<()> {
                                 highlight(&stats.uploaded.to_string())
                             );
                             println!("  {}: {}", "Replaced (modified)".cyan(), stats.replaced);
+                            if stats.collected > 0 {
+                                println!(
+                                    "  {}: {}",
+                                    "Added from SmugMug (already uploaded)".cyan(),
+                                    stats.collected
+                                );
+                            }
                             println!("  {}: {}", "Skipped (duplicates)".yellow(), stats.skipped);
                             let raw_skipped =
                                 raw_selection.skipped + raw_selection.skipped_with_sibling;
@@ -1922,8 +1935,14 @@ async fn main() -> Result<()> {
 
             let is_upload = matches!(command, DebugCommands::LibraryUpload { .. });
             let (status, body) = match command {
-                DebugCommands::Get { path, method } => {
-                    client.request_raw(&method.to_uppercase(), &path).await?
+                DebugCommands::Get { path, method, data } => {
+                    let body = data
+                        .map(|d| serde_json::from_str(&d))
+                        .transpose()
+                        .map_err(|e| anyhow::anyhow!("--data is not valid JSON: {e}"))?;
+                    client
+                        .request_raw(&method.to_uppercase(), &path, body)
+                        .await?
                 }
                 DebugCommands::LibraryUpload { file, filepath } => {
                     let file_path = std::path::Path::new(&file);

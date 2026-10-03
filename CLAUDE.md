@@ -62,6 +62,8 @@ smugmug-cli <command>
 - **src/uploader/**: Multi-threaded upload orchestration
   - `queue.rs`: Thread-safe upload queue
   - `worker.rs`: Individual upload worker logic with deduplication checks
+  - `collect.rs`: collects files already on SmugMug into the album instead of re-uploading (see Collecting below)
+  - `capture_time.rs`: EXIF `DateTimeOriginal` → the UTC time SmugMug stores, for exact searches
   - `mod.rs`: Main upload coordination, supports both flat and structured uploads
 - **src/downloader/**: Album download functionality
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
@@ -134,6 +136,14 @@ The uploader uses tokio async tasks to process files concurrently. Each worker:
 
 ### Remote Duplicate Detection
 When `--check-remote` is enabled, the tool fetches all images in an album with their MD5 hashes before uploading, allowing detection of duplicates even if the local cache is empty.
+
+### Collecting (one image in several albums)
+SmugMug doesn't deduplicate uploads: the same file uploaded to two albums becomes two images with separate stored files. An image can instead be *collected* into more albums (`POST album/<key>!collectimages`, JSON body `{"CollectUris": "<uri>,<uri>"}`; a query string gets a 400). Before the workers start, `uploader::collect::plan_collects` (single-album and default uploads; not yet `--structure`) collects files that already exist elsewhere in the account, spending as few requests as possible:
+- A cache hit whose `album_key` isn't one of the series' albums is collected from the cached URI with no lookup.
+- With `--check-remote`, other files with an EXIF capture time are found with `image!search?Scope=<user>&DateTakenStart&DateTakenEnd` over exact times: photos within 5 minutes of each other share one search (pages are capped at 100), and matches are confirmed by `ArchivedMD5`. Files without a capture time, and rendered RAWs, are just uploaded.
+- SmugMug stores EXIF `DateTimeOriginal` as **US Pacific time** (DST-aware), ignoring `OffsetTimeOriginal` and the account's time zone; `capture_time.rs` converts the same way.
+- Collects go in batches of 100 per album and take series slots like uploads. One refused URI makes the whole request a 400 listing it under `UriProblems` (the others may still have been collected); refused cache entries are removed, the rest are collected again (it's idempotent) and refused files are uploaded.
+- New uploads take a few minutes to show up in search; the cache covers files from the current run.
 
 ## Common Development Patterns
 
