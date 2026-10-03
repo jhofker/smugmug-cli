@@ -2,6 +2,7 @@ use anyhow::Result;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 
 use super::SmugMugClient;
 
@@ -69,6 +70,15 @@ struct ImageDetailsResponse {
 struct ImageDetailsResponseData {
     #[serde(rename = "Image")]
     image: ImageDetails,
+}
+
+/// SmugMug's answer to a `collect_images` call.
+#[derive(Debug, Default, PartialEq)]
+pub struct CollectResult {
+    /// URIs SmugMug refused, with its reasons (e.g. "Does not exist"). When
+    /// any are refused the whole call reports failure, though SmugMug may
+    /// still have collected the others; collecting again is harmless.
+    pub rejected: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -166,6 +176,45 @@ impl SmugMugClient {
         }
 
         Ok(())
+    }
+
+    /// Add existing images (Image or AlbumImage URIs) to the album, without
+    /// uploading them again. Collecting an image that's already in the album
+    /// changes nothing.
+    pub async fn collect_images(&self, album_key: &str, uris: &[String]) -> Result<CollectResult> {
+        let url = format!(
+            "https://api.smugmug.com/api/v2/album/{}!collectimages",
+            album_key
+        );
+        self.collect_images_at(&url, uris).await
+    }
+
+    async fn collect_images_at(&self, url: &str, uris: &[String]) -> Result<CollectResult> {
+        let body = json!({ "CollectUris": uris.join(",") });
+        let response = self.post_with_auth(url, body).await?;
+        let status = response.status();
+        let body_text = response.text().await?;
+        if status.is_success() {
+            return Ok(CollectResult::default());
+        }
+
+        // A 400 names each URI it couldn't use under
+        // Options.Parameters.POST[CollectUris].UriProblems.
+        let rejected: HashMap<String, Vec<String>> = (status == reqwest::StatusCode::BAD_REQUEST)
+            .then(|| serde_json::from_str::<serde_json::Value>(&body_text).ok())
+            .flatten()
+            .and_then(|body| {
+                body["Options"]["Parameters"]["POST"]
+                    .as_array()?
+                    .iter()
+                    .find(|p| p["Name"] == "CollectUris")
+                    .and_then(|p| serde_json::from_value(p["UriProblems"].clone()).ok())
+            })
+            .unwrap_or_default();
+        if rejected.is_empty() {
+            anyhow::bail!("Failed to collect images: {} - {}", status, body_text);
+        }
+        Ok(CollectResult { rejected })
     }
 
     pub async fn move_image(&self, image_key: &str, target_album_key: &str) -> Result<()> {
@@ -978,5 +1027,93 @@ mod tests {
 
         // In a properly architected version, we'd inject the server URL and test the actual call
         // The actual call would fail with anyhow::Error containing "Failed to move image: 403"
+    }
+
+    #[tokio::test]
+    async fn test_collect_images_sends_uris_as_json() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v2/album/ABC!collectimages")
+            .match_header("authorization", mockito::Matcher::Regex("OAuth.*".into()))
+            .match_body(mockito::Matcher::Json(json!({
+                "CollectUris": "/api/v2/image/A-0,/api/v2/album/X/image/B-0"
+            })))
+            .with_status(200)
+            .with_body(r#"{"Code":200,"Message":"Ok","Response":{}}"#)
+            .create_async()
+            .await;
+
+        let result = client
+            .collect_images_at(
+                &format!("{}/api/v2/album/ABC!collectimages", server.url()),
+                &[
+                    "/api/v2/image/A-0".to_string(),
+                    "/api/v2/album/X/image/B-0".to_string(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        mock.assert_async().await;
+        assert_eq!(result, CollectResult::default());
+    }
+
+    #[tokio::test]
+    async fn test_collect_images_reports_refused_uris() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        // Trimmed from a real response (2026-10-02).
+        let _mock = server
+            .mock("POST", "/api/v2/album/ABC!collectimages")
+            .with_status(400)
+            .with_body(
+                r#"{"Code":400,"Message":"Bad Request","Options":{"Parameters":{"POST":[
+                    {"Name":"CollectUris","Problems":["Unable to parse uris"],
+                     "UriProblems":{"/api/v2/image/GONE-0":["Does not exist"]}},
+                    {"Name":"Async"}]}}}"#,
+            )
+            .create_async()
+            .await;
+
+        let result = client
+            .collect_images_at(
+                &format!("{}/api/v2/album/ABC!collectimages", server.url()),
+                &[
+                    "/api/v2/image/GONE-0".to_string(),
+                    "/api/v2/image/OK-0".to_string(),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.rejected,
+            HashMap::from([(
+                "/api/v2/image/GONE-0".to_string(),
+                vec!["Does not exist".to_string()]
+            )])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_images_other_errors_fail() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/v2/album/ABC!collectimages")
+            .with_status(400)
+            .with_body(r#"{"Code":400,"Message":"Bad Request"}"#)
+            .create_async()
+            .await;
+
+        let error = client
+            .collect_images_at(
+                &format!("{}/api/v2/album/ABC!collectimages", server.url()),
+                &["/api/v2/image/A-0".to_string()],
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("400"));
     }
 }

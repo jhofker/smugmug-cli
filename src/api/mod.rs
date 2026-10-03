@@ -124,8 +124,14 @@ impl SmugMugClient {
     /// HTTP status and raw body without interpreting either. Query parameters
     /// are signed separately, as OAuth1 requires. Used for exploring
     /// endpoints that aren't publicly documented; OPTIONS makes SmugMug
-    /// describe an endpoint's methods and parameters.
-    pub async fn request_raw(&self, method: &str, path_or_url: &str) -> Result<(u16, String)> {
+    /// describe an endpoint's methods and parameters. A `body` is sent as
+    /// JSON, which is how SmugMug takes the parameters of POST/PATCH calls.
+    pub async fn request_raw(
+        &self,
+        method: &str,
+        path_or_url: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<(u16, String)> {
         let full = if path_or_url.starts_with("http") {
             path_or_url.to_string()
         } else {
@@ -151,13 +157,15 @@ impl SmugMugClient {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
         headers.insert("Accept", HeaderValue::from_static("application/json"));
 
-        let response = self
+        let mut request = self
             .client
             .request(reqwest::Method::from_bytes(method.as_bytes())?, url)
             .query(&params)
-            .headers(headers)
-            .send()
-            .await?;
+            .headers(headers);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await?;
         let status = response.status().as_u16();
         Ok((status, response.text().await?))
     }
@@ -175,14 +183,15 @@ impl SmugMugClient {
         first_url: &str,
         locator: &str,
     ) -> Result<Vec<T>> {
-        let origin = {
-            let parsed = reqwest::Url::parse(first_url)?;
-            parsed.origin().ascii_serialization()
-        };
+        let mut parsed = reqwest::Url::parse(first_url)?;
+        let origin = parsed.origin().ascii_serialization();
+        // The first URL's own query parameters are signed separately too.
+        let first_params: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+        parsed.set_query(None);
 
         let mut items = Vec::new();
         let mut next: Option<(String, Vec<(String, String)>)> =
-            Some((first_url.to_string(), Vec::new()));
+            Some((parsed.to_string(), first_params));
         let mut pages = 0;
 
         while let Some((url, params)) = next.take() {

@@ -62,6 +62,7 @@ smugmug-cli <command>
 - **src/uploader/**: Multi-threaded upload orchestration
   - `queue.rs`: Thread-safe upload queue
   - `worker.rs`: Individual upload worker logic with deduplication checks
+  - `collect.rs`: adds files the cache knows are in another album to this one instead of skipping them (see Collecting below)
   - `mod.rs`: Main upload coordination, supports both flat and structured uploads
 - **src/downloader/**: Album download functionality
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
@@ -134,6 +135,11 @@ The uploader uses tokio async tasks to process files concurrently. Each worker:
 
 ### Remote Duplicate Detection
 When `--check-remote` is enabled, the tool fetches all images in an album with their MD5 hashes before uploading, allowing detection of duplicates even if the local cache is empty.
+
+### Collecting (one image in several albums)
+The workers skip any file in the cache, so a file uploaded to album A would never appear in album B. SmugMug doesn't deduplicate uploads (uploading again stores a second, separate image), but an image can be *collected* into more albums: `POST album/<key>!collectimages` with JSON body `{"CollectUris": "<uri>,<uri>"}` (a query string gets a 400). Before the workers start, `uploader::collect::plan_collects` (single-album and default uploads; not yet `--structure`; not with `--no-cache`) collects cache hits whose `album_key` isn't one of the series' albums, from the cached URI, with no lookups.
+- Collects go in batches of 100 per album and take series slots like uploads. One refused URI makes the whole request a 400 listing it under `UriProblems` (the others may still have been collected); refused cache entries are removed, the rest are collected again (it's idempotent) and refused files are uploaded. A collect that fails outright (e.g. a 503) counts its files as failed: they're not uploaded (that would duplicate them) and their cache entries stay, so the next run retries.
+- Finding files *not* in the cache account-wide was tried and dropped as not worth the complexity (SmugMug storage is unlimited). For the record: `image!search?Scope=<user>&DateTakenStart&DateTakenEnd` works with exact second ranges (100 results per page, a few minutes' indexing lag), and SmugMug stores EXIF `DateTimeOriginal` as US Pacific time (DST-aware), ignoring `OffsetTimeOriginal` and the account's time zone.
 
 ## Common Development Patterns
 

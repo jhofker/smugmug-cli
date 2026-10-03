@@ -17,6 +17,7 @@ See [README.md](README.md) for usage and [CLAUDE.md](CLAUDE.md) for implementati
 - SHA256 of file contents, stored in a local sled database
 - By default, a file whose name already exists in the destination album is skipped if its content is unchanged and replaced in place if it differs
 - `--check-remote` also matches existing SmugMug images by content hash regardless of filename
+- Files the cache knows are already on SmugMug in another album are added to the destination album ("collected") instead of being skipped or uploaded again
 - `--no-cache` bypasses the local cache
 
 ### 3. Album Organization
@@ -65,6 +66,7 @@ smugmug-cli/
 │   ├── uploader/            # Upload orchestration
 │   │   ├── mod.rs           # Flat and structured uploads
 │   │   ├── album_series.rs  # 5,000-image overflow planning
+│   │   ├── collect.rs       # Add already-uploaded files to the album
 │   │   ├── queue.rs
 │   │   └── worker.rs        # Per-file dedup, upload, replace
 │   └── downloader/          # Album downloads
@@ -102,6 +104,7 @@ Every request is signed in `SmugMugClient::build_oauth_header()`.
 - `/api/v2!authuser`, `/api/v2/user/{nickname}` - user info
 - `/api/v2/node/{id}` and `!children` - folders and albums as nodes
 - `/api/v2/album/{key}` and `!images` - album settings and image lists
+- `/api/v2/album/{key}!collectimages` - add existing images to an album
 - `upload.smugmug.com` - image upload and replace (separate domain)
 
 List endpoints return one page per request; `get_all_pages` follows `Pages.NextPage` so nothing past the first page is dropped.
@@ -151,7 +154,7 @@ file_hash (SHA256) -> {
 
 ### Upload Decision Logic (per file)
 1. Calculate the SHA256 of the file
-2. Check the local cache; skip if present
+2. Check the local cache: skip if the file is already in the destination album series; if it was uploaded to another album, collect that image into the destination instead (`uploader/collect.rs`, batched before the workers start)
 3. Compare against images in the destination album (every album in the series): same name and same content is skipped, same name with different content is replaced in place
 4. With `--check-remote`, also skip content that exists under a different name
 5. Otherwise upload (creating the next album in the series only at this point), then store the hash
