@@ -5,8 +5,10 @@ A fast, reliable command-line tool for uploading photos to SmugMug with intellig
 ## Features
 
 - **Simple Upload**: Upload individual files or entire directories
+- **Albums by Date**: Files go into albums by the day they were taken (`2014/07/2014-07-12`)
+- **Scheduled Backups**: `backup` keeps a library backed up on an interval, re-reading only files that changed
 - **Smart Deduplication**: Hash-based detection prevents re-uploading the same photo
-- **Album Organization**: Automatically create and organize albums based on folder structure
+- **Album Organization**: Or keep your folder structure, or put everything in one album
 - **Multi-threaded**: Concurrent uploads for maximum speed
 - **Docker Support**: Easy deployment as a container
 - **Local Cache**: Fast lookups of previously uploaded files
@@ -59,25 +61,32 @@ docker build -t smugmug-cli .
 
 ### Docker Compose
 
-See `docker-compose.yml` for a complete example. Basic usage:
+See `docker-compose.yml` for a complete example. A scheduled backup:
 
 ```yaml
 services:
-  upload:
+  backup:
     image: ghcr.io/jhofker/smugmug-cli:latest
-    command: upload /photos --album "My Photos"
+    command: backup /photos --interval 6h --exclude "old_backup/"
+    restart: unless-stopped
+    stop_grace_period: 2m
     environment:
       - PUID=99  # Defaults to 99:100 if not specified
       - PGID=100
+      - TZ=America/Chicago
       - SMUGMUG_API_KEY=${SMUGMUG_API_KEY}
       - SMUGMUG_API_SECRET=${SMUGMUG_API_SECRET}
       - SMUGMUG_ACCESS_TOKEN=${SMUGMUG_ACCESS_TOKEN}
       - SMUGMUG_ACCESS_TOKEN_SECRET=${SMUGMUG_ACCESS_TOKEN_SECRET}
     volumes:
       - ~/.config/smugmug-cli:/home/smugmug/.config/smugmug-cli
-      - ~/.cache/smugmug-cli:/home/smugmug/.cache/smugmug-cli
+      - ~/.cache/smugmug-cli:/home/smugmug/.cache/smugmug-cli  # must persist
       - /path/to/photos:/photos:ro
 ```
+
+With the `SMUGMUG_*` variables set, no config file is needed. The container runs at low CPU
+priority (`NICE`, default 10) and idle I/O priority where the kernel allows it
+(`IONICE_CLASS`, default 3); set either to an empty string to turn it off.
 
 To build locally instead, replace `image:` with `build: .`
 
@@ -155,14 +164,31 @@ access_token_secret = "your_access_token_secret"
 [upload]
 threads = 4
 retry_attempts = 3
-# Folder for monthly albums when `upload` gets no --album (created private)
+# Folder for albums by date when `upload` gets no --album (created private)
 default_folder = "Uploads"
 # RAW files: "auto" (originals with SmugMug Source, otherwise rendered JPEGs),
 # "render", "original" or "skip"
 raw_mode = "auto"
+# Files read (hashed, dated, RAWs rendered) at once; keep low for spinning disks
+read_threads = 2
+# Video half of a Live Photo (IMG_1234.HEIC + IMG_1234.MOV): "upload" or "skip"
+live_photo_videos = "upload"
 
 [deduplication]
 enabled = true
+
+# For `smugmug-cli backup`
+[backup]
+sources = ["/photos"]
+folder = "Backup"
+# .gitignore syntax, relative to each source
+exclude = ["old_backup/", "**/Screenshots/"]
+# Time between runs; without it, backup runs once
+interval = "6h"
+# Optional overrides of the [upload] settings above
+# upload_threads = 6
+# read_threads = 2
+# live_photo_videos = "skip"
 ```
 
 ## Commands
@@ -179,6 +205,7 @@ enabled = true
   - `--threads <N>` - Number of concurrent upload threads (default: 4)
   - `--album <NAME>` - Album name (creates if doesn't exist, private by default)
   - `--parent <PATH>` - Parent folder path (e.g., "2024/Travel")
+  - `--exclude <PATTERN>` - Leave out matching paths (.gitignore syntax; repeatable). Uploads by date only
   - `--structure` - Recreate the directory structure as SmugMug folders and albums
   - `--interactive` - Ask whether to upload to one album or keep the folder structure
   - `--dry-run` - Preview what would be uploaded without uploading (creates no folders or albums)
@@ -186,10 +213,11 @@ enabled = true
   - `--no-cache` - Disable local cache (always check files, even if previously uploaded)
   - `--raw <MODE>` - How to handle RAW files (`auto`, `render`, `original`, `skip`), overriding `raw_mode` in the config
 
-**Where files go:** with no `--album`, files go to an album named for the current month
-(e.g. `2026-09`) inside the `default_folder` from your config (`Uploads` unless changed), or
-inside `--parent` if given. The default folder and all auto-created albums are private; use
-`albums settings` to change privacy after creation.
+**Where files go:** with no `--album`, each file goes into a private album for the day it was
+taken, `YEAR/MONTH/YEAR-MONTH-DAY` (e.g. `Uploads/2014/07/2014-07-12`), inside the
+`default_folder` from your config (`Uploads` unless changed), or inside `--parent` if given.
+See [Albums by date](#albums-by-date) below. `--dry-run` shows how many files would go where
+without reading files in full or contacting SmugMug.
 
 **Album size limit:** SmugMug allows 5,000 photos and videos per album. When an upload would go
 past that, it continues in `Name (2)`, `Name (3)`, and so on, filling any partly-used album in
@@ -213,10 +241,67 @@ GPS, orientation) copied in. Things to know:
   converted instead, with [rawler](https://github.com/dnglab/dnglab). That takes a few seconds
   and several hundred MB of memory per file (one at a time), and looks flatter than the
   camera's rendering. Files it can't decode fail and are listed as failed.
-- A re-run skips a RAW whose `.jpg` is already in the album, without comparing contents.
+- With `--album`, a re-run skips a RAW whose `.jpg` is already in the album, without comparing
+  contents. Uploads by date compare the rendered JPEG instead, so a metadata-only edit to a
+  RAW (a DNG whose embedded XMP changed) isn't uploaded again.
 
 Set `raw_mode` in the config (or pass `--raw`) to change this: `render` always uploads JPEGs,
 `original` uploads RAW originals (skipped without Source), `skip` leaves RAW files out.
+
+### Albums by date
+
+Used by `upload` without `--album` and by `backup`:
+
+- **Dates** come from, in order: the photo's EXIF capture date; a video's metadata (Apple's
+  local creation date, else the movie header's UTC time shown in the local time zone, so set
+  `TZ` in containers); a date in the file name (`IMG_20140712_…`, `2014-07-12 …`,
+  `IMG-20140712-WA0001`, `PXL_…`); the EXIF "last written" date; and finally the file's
+  modification time. The summary says how many files were dated each way.
+- **Live Photos**: a video next to a photo of the same name (`IMG_1234.HEIC` +
+  `IMG_1234.MOV`) goes into the photo's day album. Set `live_photo_videos = "skip"` to leave
+  them out.
+- **Days with more than 5,000 files** continue in `2014-07-12 (2)` and so on. Year and month
+  folders and day albums are created only when a file needs them, all private.
+- **Duplicates** (the same content at several paths, e.g. a backup copy of a folder) are
+  uploaded once; the other copies are linked to that image. A file already on SmugMug in
+  another album (uploaded with `--album`, say) is added to its day album rather than
+  uploaded again.
+- **Same name, different photo** (two cameras both writing `IMG_0001.JPG` on one day): the
+  second is uploaded as `IMG_0001~1a2b3c4d.JPG` instead of overwriting the first.
+- **Edited files** replace the image uploaded from that path, unless an identical copy
+  elsewhere shares that image, in which case the edit is uploaded as a new image.
+- **Re-runs are cheap**: the cache records each file's size and modification time, so an
+  unchanged file is skipped without being read, and a run over an unchanged library makes no
+  SmugMug requests at all. A file whose time changed but content didn't is re-read once and
+  not uploaded. Files SmugMug refuses (too big, unsupported) aren't retried until they change.
+- **Excluded**: paths matching `--exclude`/`exclude` patterns, hidden files and folders
+  (`.DS_Store`, `._*` AppleDouble files), NAS metadata folders (`@eaDir`, `#recycle`), and
+  anything listed in a `.smugmugignore` file (.gitignore syntax) in any folder.
+
+Nothing is ever deleted from SmugMug: removing or moving a local file leaves its image there.
+
+### Backup
+
+- `smugmug-cli backup [SOURCES...]` - Back up directories into albums by date, again every interval
+  - `--folder <NAME>` - SmugMug folder to back up into (default: `Backup`)
+  - `--exclude <PATTERN>` - Leave out matching paths (.gitignore syntax, relative to each source; repeatable)
+  - `--interval <TIME>` - Time between the end of one run and the start of the next (`30m`, `6h`, `1d`)
+  - `--once` - Run once even if an interval is configured
+  - `--threads <N>` / `--read-threads <N>` - Concurrent uploads / file reads
+  - `--dry-run` - Show how many files would go into which years and days (reads only metadata; contacts nothing)
+  - `--raw <MODE>` - RAW handling, as for `upload`
+
+Everything can also be set in the `[backup]` section of the config, and sources, folder and
+interval through `SMUGMUG_BACKUP_SOURCES` (comma-separated), `SMUGMUG_BACKUP_FOLDER` and
+`SMUGMUG_BACKUP_INTERVAL`. Each run prints a summary and writes it to `last_run.json` in the
+cache directory. Ctrl-C or `docker stop` finishes the uploads in progress and saves the cache
+before exiting; the rest is picked up next run.
+
+**First run on a big library**: the first run reads every file once (to hash and date it), so
+it takes a while; later runs only `stat` files. Start with `--dry-run` to check exclusions
+and how files will be dated. On Unraid, the *Dynamix Cache Directories* plugin keeps
+directory listings in memory so the periodic `stat` walk doesn't spin up array disks, and
+the cache directory belongs on the SSD pool (e.g. `/mnt/user/appdata/smugmug-cli`).
 
 ### Albums
 

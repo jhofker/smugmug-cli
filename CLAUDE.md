@@ -64,6 +64,13 @@ smugmug-cli <command>
   - `worker.rs`: Individual upload worker logic with deduplication checks
   - `collect.rs`: adds files the cache knows are in another album to this one instead of skipping them (see Collecting below)
   - `mod.rs`: Main upload coordination, supports both flat and structured uploads
+- **src/dated/**: uploads into albums by capture date, `<root>/YYYY/MM/YYYY-MM-DD` (default `upload` destination and `backup`)
+  - `scan.rs`: walks with the `ignore` crate (exclude globs as overrides, `.smugmugignore`, hidden files, NAS dirs pruned), stat only; pairs Live Photo videos with their photo and drops RAWs with a JPEG sibling (`select_raw_files`)
+  - `index.rs`: sled tree `files` (path → size, mtime, SHA-256, uploaded MD5, date, image URI) and `refs` (image URI → paths using it), in the hash store's database
+  - `date.rs`: EXIF original date (kamadak-exif; RAWs via `raw::exif`), QuickTime `com.apple.quicktime.creationdate`/`mvhd`, file-name dates, EXIF `DateTime`, mtime
+  - `plan.rs`: year/month folders and day album series (`AlbumSeries` per day), created lazily and listed once per run; per-day file-name map for same-name/different-content renames (`stem~md5[..8].ext`); `Smug` trait with an in-memory fake for tests
+  - `run.rs`: the pipeline (see below); `Uploads` trait so tests run against the fake
+- **src/backup.rs**: `backup` command: interval loop, `last_run.json`
 - **src/downloader/**: Album download functionality
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
   - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB
@@ -88,23 +95,28 @@ Authentication is handled by `SmugMugClient::build_oauth_header()` which generat
 Cache location: `~/.cache/smugmug-cli/hash_store/`
 
 ### Upload Modes
-- **Default destination** (no `--album`): monthly album (`YYYY-MM`) in the private `upload.default_folder` (default `Uploads`), or in `--parent`
+- **Default destination** (no `--album`): albums by capture date (`YYYY/MM/YYYY-MM-DD`) in the private `upload.default_folder` (default `Uploads`), or in `--parent`, via `dated::run` (see Dated uploads below)
 - **Single Album** (`--album`): Flatten all images into one album (with optional parent folder)
 - **Maintain Structure** (`--structure`): Preserve directory structure as folders/albums on SmugMug
 - `--interactive` brings back the old prompt to choose between the last two
 
-Single-album and default uploads go into an album series (`uploader/album_series.rs`): SmugMug caps albums at 5,000 images, so files overflow into `Name (2)`, `Name (3)`, .... `AlbumSeries::load` finds the existing albums; each worker calls `claim()` only once a file actually needs a new upload (creating the next album on demand) and `release()` if it fails, so skipped files never create albums. Duplicate/replace detection covers every existing album in the series. Tested against an in-memory backend. Scanning and RAW filtering happen before anything touches SmugMug; dry runs create no folders or albums.
+Single-album uploads (and each day in dated uploads) go into an album series (`uploader/album_series.rs`): SmugMug caps albums at 5,000 images, so files overflow into `Name (2)`, `Name (3)`, .... `AlbumSeries::load` finds the existing albums; each worker calls `claim()` only once a file actually needs a new upload (creating the next album on demand) and `release()` if it fails, so skipped files never create albums. Duplicate/replace detection covers every existing album in the series. Tested against an in-memory backend. Scanning and RAW filtering happen before anything touches SmugMug; dry runs create no folders or albums.
 
 RAW files follow `upload.raw_mode` / `--raw` (`RawMode::handling` turns it into upload, render or skip given `has_smugmug_source`). `uploader::select_raw_files` runs before upload and drops RAWs that would render to the same name as a JPEG/HEIC next to them. Rendered RAWs are cached under the RAW file's SHA-256, uploaded as `<stem>.jpg`, and skipped (not replaced) when that name is already in the album. Rendering runs in `spawn_blocking`; preview extraction is deterministic, but don't rely on MD5 matches across versions of this code or its dependencies.
 
-SmugMug list endpoints (`!albums`, `!images`, `!comments`, `!children`, ...) return one page per request (often 100 items, sometimes 50) with the next page in `Response.Pages.NextPage`. Read lists through `SmugMugClient::get_all_pages(url, locator)`, which follows every page; a single `get_with_auth` on a list endpoint silently drops everything after the first page. (The `!children` lookups in `albums.rs` page by hand so they can stop as soon as they find a match.)
+SmugMug list endpoints (`!albums`, `!images`, `!comments`, `!children`, ...) return one page per request (often 100 items, sometimes 50) with the next page in `Response.Pages.NextPage`. Read lists through `SmugMugClient::get_all_pages(url, locator)`, which follows every page; a single `get_with_auth` on a list endpoint silently drops everything after the first page. (The `!children` lookups in `albums.rs` page by hand so they can stop as soon as they find a match; `list_children` reads them all.) `auth_user()` caches the signed-in user's nickname and root node per client.
 
 SmugMug's Library ("All Media") would be the natural default destination, but its endpoints (`upload.smugmug.com/api/v2/library`, `/api/v2/library!assets`) return 404 to OAuth API keys as of 2026-09; `api::upload::upload_to_library` and the hidden `debug` commands are kept for when that changes.
 
+### Dated uploads and `backup`
+`dated::run` makes one pass: scan (stat only) → files whose index record matches size+mtime are skipped unread → the rest are read on `read_threads` blocking threads (SHA-256+MD5 in one 1 MiB-buffered pass; RAWs read whole, rendered only if needed) → `upload_threads` futures on one task (no `Send` bounds needed) link, collect, replace or upload. Per file: same SHA as the record → re-record; SHA in the hash store → link if in the day's albums, else collect (batched per day); rendered RAW whose JPEG MD5 equals the record's → re-record; record has an image used by no other path → replace; else upload (name reserved in the day's map). Identical copies read concurrently wait on the first upload (`in_flight`). SmugMug 400/413/415/422 refusals are recorded (`failed`) and not retried until the file changes. A dry run only dates files and makes no API calls. Uploads stream from disk (`api::upload::upload_file`) through the client's shared connection pool.
+
+`backup` repeats `dated::run` every interval (measured from the end of a run). Ctrl-C/SIGTERM sets a stop flag: readers stop, in-flight uploads finish, sled flushes.
+
 ### Configuration Priority
-1. Environment variables (SMUGMUG_API_KEY, etc.)
-2. .env file in project root
-3. Config file at `~/.config/smugmug-cli/config.toml`
+1. Environment variables (`SMUGMUG_API_KEY`, `SMUGMUG_API_SECRET`, `SMUGMUG_ACCESS_TOKEN`, `SMUGMUG_ACCESS_TOKEN_SECRET`) override the config file's credentials; with the key and token set, no config file is needed (containers)
+2. Config file at `~/.config/smugmug-cli/config.toml` (`[auth]`, `[upload]`, `[deduplication]`, `[backup]`)
+3. A `.env` file is only read by `init`/`auth` as defaults
 
 ## Testing Notes
 
@@ -137,7 +149,7 @@ The uploader uses tokio async tasks to process files concurrently. Each worker:
 When `--check-remote` is enabled, the tool fetches all images in an album with their MD5 hashes before uploading, allowing detection of duplicates even if the local cache is empty.
 
 ### Collecting (one image in several albums)
-The workers skip any file in the cache, so a file uploaded to album A would never appear in album B. SmugMug doesn't deduplicate uploads (uploading again stores a second, separate image), but an image can be *collected* into more albums: `POST album/<key>!collectimages` with JSON body `{"CollectUris": "<uri>,<uri>"}` (a query string gets a 400). Before the workers start, `uploader::collect::plan_collects` (single-album and default uploads; not yet `--structure`; not with `--no-cache`) collects cache hits whose `album_key` isn't one of the series' albums, from the cached URI, with no lookups.
+The workers skip any file in the cache, so a file uploaded to album A would never appear in album B. SmugMug doesn't deduplicate uploads (uploading again stores a second, separate image), but an image can be *collected* into more albums: `POST album/<key>!collectimages` with JSON body `{"CollectUris": "<uri>,<uri>"}` (a query string gets a 400). Before the workers start, `uploader::collect::plan_collects` (single-album uploads; dated uploads collect per day through `collect_batch`; not `--structure`; not with `--no-cache`) collects cache hits whose `album_key` isn't one of the series' albums, from the cached URI, with no lookups.
 - Collects go in batches of 100 per album and take series slots like uploads. One refused URI makes the whole request a 400 listing it under `UriProblems` (the others may still have been collected); refused cache entries are removed, the rest are collected again (it's idempotent) and refused files are uploaded. A collect that fails outright (e.g. a 503) counts its files as failed: they're not uploaded (that would duplicate them) and their cache entries stay, so the next run retries.
 - Finding files *not* in the cache account-wide was tried and dropped as not worth the complexity (SmugMug storage is unlimited). For the record: `image!search?Scope=<user>&DateTakenStart&DateTakenEnd` works with exact second ranges (100 results per page, a few minutes' indexing lag), and SmugMug stores EXIF `DateTimeOriginal` as US Pacific time (DST-aware), ignoring `OffsetTimeOriginal` and the account's time zone.
 
@@ -145,7 +157,7 @@ The workers skip any file in the cache, so a file uploaded to album A would neve
 
 ### Adding a New API Endpoint
 1. Add method to `SmugMugClient` in appropriate module (albums, images, upload)
-2. Use `get_with_auth()` or `post_with_auth()` for authenticated requests
+2. Use `get_with_auth()` or `post_with_auth()` for authenticated requests (they retry 429s and failed connections, GETs also 5xx, honoring `Retry-After`; requests sent with `self.client` directly don't)
 3. Define response structs with serde derives
 4. Add unit tests with mockito
 

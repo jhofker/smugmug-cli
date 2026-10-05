@@ -10,6 +10,8 @@ pub struct Config {
     pub auth: AuthConfig,
     pub upload: UploadConfig,
     pub deduplication: DeduplicationConfig,
+    #[serde(default)]
+    pub backup: BackupConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,6 +36,68 @@ pub struct UploadConfig {
     /// What to do with RAW files (see `RawMode`).
     #[serde(default)]
     pub raw_mode: RawMode,
+    /// Files read (hashed, dated, RAWs rendered) at once. Uploads don't
+    /// wait on reads, so a couple are enough to keep them busy without
+    /// thrashing spinning disks.
+    #[serde(default = "default_read_threads")]
+    pub read_threads: usize,
+    /// What to do with the video half of a Live Photo (see
+    /// `LivePhotoVideos`).
+    #[serde(default)]
+    pub live_photo_videos: LivePhotoVideos,
+}
+
+/// The video half of a Live Photo: a short video with the same name as a
+/// photo next to it (`IMG_1234.HEIC` + `IMG_1234.MOV`). SmugMug shows it as
+/// a separate video.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LivePhotoVideos {
+    /// Upload it, into the same day album as its photo
+    #[default]
+    Upload,
+    /// Leave it out
+    Skip,
+}
+
+fn default_read_threads() -> usize {
+    2
+}
+
+/// `smugmug-cli backup`: what to back up, where to, and how often.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackupConfig {
+    /// Directories to back up.
+    pub sources: Vec<PathBuf>,
+    /// SmugMug folder the year/month/day albums go in. Created private.
+    pub folder: String,
+    /// Paths to leave out, in .gitignore syntax, relative to each source
+    /// (e.g. "old_backup/", "**/Thumbs.db").
+    pub exclude: Vec<String>,
+    /// Time between the end of one run and the start of the next (e.g.
+    /// "6h", "30m", "1d"). Without it, `backup` runs once.
+    pub interval: Option<String>,
+    /// Overrides `upload.threads` for backups.
+    pub upload_threads: Option<usize>,
+    /// Overrides `upload.read_threads` for backups.
+    pub read_threads: Option<usize>,
+    /// Overrides `upload.live_photo_videos` for backups.
+    pub live_photo_videos: Option<LivePhotoVideos>,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        BackupConfig {
+            sources: Vec::new(),
+            folder: "Backup".to_string(),
+            exclude: Vec::new(),
+            interval: None,
+            upload_threads: None,
+            read_threads: None,
+            live_photo_videos: None,
+        }
+    }
 }
 
 /// How `upload` treats RAW files. Uploading RAW originals needs a SmugMug
@@ -102,11 +166,14 @@ impl Default for Config {
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
                 raw_mode: RawMode::default(),
+                read_threads: default_read_threads(),
+                live_photo_videos: LivePhotoVideos::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
                 cache_path: cache_dir.join("hashes.db"),
             },
+            backup: BackupConfig::default(),
         }
     }
 }
@@ -365,7 +432,9 @@ async fn browser_sign_in(
 /// the environment/.env, else prompts. Creates the config if missing.
 pub async fn auth_command() -> Result<()> {
     let _ = dotenvy::dotenv();
-    let existing = load_config().ok();
+    // The file alone: it's saved back below, and credentials that only came
+    // from the environment mustn't end up in it.
+    let existing = load_config_file().ok();
 
     let (api_key, api_secret) = match &existing {
         Some(cfg) if !cfg.auth.api_key.is_empty() && !cfg.auth.api_secret.is_empty() => {
@@ -432,7 +501,82 @@ pub async fn auth_command() -> Result<()> {
     Ok(())
 }
 
+/// The credential variables, in `AuthConfig` field order.
+const CREDENTIAL_VARS: [&str; 4] = [
+    "SMUGMUG_API_KEY",
+    "SMUGMUG_API_SECRET",
+    "SMUGMUG_ACCESS_TOKEN",
+    "SMUGMUG_ACCESS_TOKEN_SECRET",
+];
+
+/// The config to run with: the config file with any credentials from the
+/// environment (as a container gets them) put over its own. Without a file,
+/// all four credentials must be in the environment. Never save this back:
+/// use `load_config_file` for that, so environment credentials stay out of
+/// the file.
 pub fn load_config() -> Result<Config> {
+    let file = match load_config_file() {
+        Ok(config) => Some(config),
+        Err(e) if get_config_path()?.exists() => return Err(e),
+        Err(_) => None,
+    };
+    with_env_credentials(file, |name| {
+        std::env::var(name).ok().filter(|v| !v.is_empty())
+    })
+}
+
+/// `config` (the file's, if there is one) with credentials from `env` put
+/// over its own.
+fn with_env_credentials(
+    config: Option<Config>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Config> {
+    let values: Vec<Option<String>> = CREDENTIAL_VARS.iter().map(|name| env(name)).collect();
+    let mut config = match config {
+        Some(config) => config,
+        None if values.iter().all(Option::is_none) => {
+            anyhow::bail!(
+                "Config file not found at: {}\n\n\
+                 Run 'smugmug-cli init' to create your configuration, or set {}.\n\
+                 (Tip: You can create a .env file with your credentials, and init will use them as defaults)",
+                get_config_path()?.display(),
+                CREDENTIAL_VARS.join(", ")
+            );
+        }
+        None => {
+            let missing: Vec<&str> = CREDENTIAL_VARS
+                .iter()
+                .zip(&values)
+                .filter(|(_, v)| v.is_none())
+                .map(|(name, _)| *name)
+                .collect();
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "No config file, and these credentials aren't set: {}",
+                    missing.join(", ")
+                );
+            }
+            Config::default()
+        }
+    };
+    let [key, secret, token, token_secret] = <[Option<String>; 4]>::try_from(values).unwrap();
+    let auth = &mut config.auth;
+    for (field, value) in [
+        (&mut auth.api_key, key),
+        (&mut auth.api_secret, secret),
+        (&mut auth.access_token, token),
+        (&mut auth.access_token_secret, token_secret),
+    ] {
+        if let Some(value) = value {
+            *field = value;
+        }
+    }
+    Ok(config)
+}
+
+/// The config file exactly as written (no environment overrides), for
+/// changing and saving back.
+pub fn load_config_file() -> Result<Config> {
     let config_path = get_config_path()?;
 
     if !config_path.exists() {
@@ -446,9 +590,7 @@ pub fn load_config() -> Result<Config> {
 
     let contents = fs::read_to_string(&config_path).context("Failed to read config file")?;
 
-    let config: Config = toml::from_str(&contents).context("Failed to parse config file")?;
-
-    Ok(config)
+    toml::from_str(&contents).context("Failed to parse config file")
 }
 
 pub fn save_config(config: &Config) -> Result<()> {
@@ -495,12 +637,75 @@ mod tests {
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
                 raw_mode: RawMode::default(),
+                read_threads: default_read_threads(),
+                live_photo_videos: LivePhotoVideos::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
                 cache_path: PathBuf::from("/tmp/test_cache.db"),
             },
+            backup: BackupConfig::default(),
         }
+    }
+
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn environment_credentials_override_the_file() {
+        let config = with_env_credentials(
+            Some(create_test_config()),
+            env_of(&[("SMUGMUG_ACCESS_TOKEN", "env-token")]),
+        )
+        .unwrap();
+        assert_eq!(config.auth.access_token, "env-token");
+        assert_eq!(config.auth.api_key, create_test_config().auth.api_key);
+    }
+
+    #[test]
+    fn without_a_file_all_four_credentials_are_needed() {
+        let err = with_env_credentials(
+            None,
+            env_of(&[("SMUGMUG_API_KEY", "k"), ("SMUGMUG_ACCESS_TOKEN", "t")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("SMUGMUG_API_SECRET"), "{}", err);
+        assert!(err.contains("SMUGMUG_ACCESS_TOKEN_SECRET"), "{}", err);
+        assert!(!err.contains("SMUGMUG_API_KEY,"), "{}", err);
+
+        let config = with_env_credentials(
+            None,
+            env_of(&[
+                ("SMUGMUG_API_KEY", "k"),
+                ("SMUGMUG_API_SECRET", "s"),
+                ("SMUGMUG_ACCESS_TOKEN", "t"),
+                ("SMUGMUG_ACCESS_TOKEN_SECRET", "ts"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                config.auth.api_key.as_str(),
+                config.auth.api_secret.as_str(),
+                config.auth.access_token.as_str(),
+                config.auth.access_token_secret.as_str()
+            ),
+            ("k", "s", "t", "ts")
+        );
+    }
+
+    #[test]
+    fn without_a_file_or_credentials_it_says_how_to_set_up() {
+        let err = with_env_credentials(None, env_of(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("smugmug-cli init"), "{}", err);
     }
 
     #[test]
@@ -932,6 +1137,8 @@ cache_path = "/absolute/path/cache.db"
             has_smugmug_source: false,
             default_folder: default_upload_folder(),
             raw_mode: RawMode::default(),
+            read_threads: 2,
+            live_photo_videos: LivePhotoVideos::default(),
         };
 
         let debug_string = format!("{:?}", upload);
@@ -967,11 +1174,14 @@ cache_path = "/absolute/path/cache.db"
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
                 raw_mode: RawMode::default(),
+                read_threads: default_read_threads(),
+                live_photo_videos: LivePhotoVideos::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
                 cache_path: PathBuf::from("/custom/cache.db"),
             },
+            backup: BackupConfig::default(),
         };
 
         assert_eq!(config.auth.api_key, "test_key");

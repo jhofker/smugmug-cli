@@ -67,6 +67,11 @@ fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
     }
 }
 
+/// Where uploads keep their cache (the hash store and file index).
+fn upload_cache_dir() -> Result<std::path::PathBuf> {
+    cache::get_cache_path()
+}
+
 /// Format a number with thousands separators
 fn format_number(n: usize) -> String {
     let s = n.to_string();
@@ -116,8 +121,10 @@ fn format_duration(seconds: u64) -> String {
 }
 
 mod api;
+mod backup;
 mod cache;
 mod config;
+mod dated;
 mod downloader;
 mod raw;
 mod scanner;
@@ -170,15 +177,22 @@ enum Commands {
         #[arg(short, long, default_value = "4")]
         threads: usize,
 
-        /// Album name (creates if doesn't exist). Without it, files go to a
-        /// monthly album (e.g. "2026-09") in the configured default folder
-        /// ("Uploads" unless changed), or in --parent if given
+        /// Album name (creates if doesn't exist). Without it, files go into
+        /// albums by the day they were taken (YEAR/MONTH/YEAR-MONTH-DAY) in
+        /// the configured default folder ("Uploads" unless changed), or in
+        /// --parent if given
         #[arg(short, long)]
         album: Option<String>,
 
         /// Parent folder path (e.g., "2024/Travel" creates album in Travel folder)
         #[arg(short, long)]
         parent: Option<String>,
+
+        /// Leave out paths matching this pattern (.gitignore syntax,
+        /// relative to PATH; e.g. "old_backup/" or "*.png"). Repeatable.
+        /// Only for uploads by date (no --album or --structure)
+        #[arg(short = 'x', long = "exclude", value_name = "PATTERN")]
+        excludes: Vec<String>,
 
         /// Recreate the directory structure as SmugMug folders and albums
         #[arg(long, conflicts_with_all = ["album", "parent", "interactive"])]
@@ -207,6 +221,59 @@ enum Commands {
         /// How to handle RAW files, overriding `raw_mode` in the config:
         /// upload originals (needs SmugMug Source), JPEGs rendered from
         /// their embedded previews, or nothing. Default: auto
+        #[arg(long, value_enum)]
+        raw: Option<config::RawMode>,
+    },
+
+    /// Back up directories into albums by the day photos were taken
+    /// (FOLDER/YEAR/MONTH/YEAR-MONTH-DAY), again every --interval. Settings
+    /// come from the [backup] section of the config; options override them.
+    Backup {
+        /// Directories to back up (default: [backup] sources)
+        #[arg(env = "SMUGMUG_BACKUP_SOURCES", value_delimiter = ',')]
+        sources: Vec<std::path::PathBuf>,
+
+        /// SmugMug folder to back up into (default: [backup] folder, "Backup")
+        #[arg(short, long, env = "SMUGMUG_BACKUP_FOLDER")]
+        folder: Option<String>,
+
+        /// Leave out paths matching this pattern (.gitignore syntax,
+        /// relative to each source). Repeatable; adds to [backup] exclude
+        #[arg(
+            short = 'x',
+            long = "exclude",
+            value_name = "PATTERN",
+            env = "SMUGMUG_BACKUP_EXCLUDE",
+            value_delimiter = ','
+        )]
+        excludes: Vec<String>,
+
+        /// Time between the end of one run and the start of the next, e.g.
+        /// "6h", "30m", "1d" (default: [backup] interval; without one, runs
+        /// once)
+        #[arg(short, long, env = "SMUGMUG_BACKUP_INTERVAL")]
+        interval: Option<String>,
+
+        /// Run once even if an interval is configured
+        #[arg(long)]
+        once: bool,
+
+        /// Concurrent uploads
+        // Text so a blank SMUGMUG_BACKUP_THREADS (an unset template field)
+        // means "not given" rather than an error.
+        #[arg(short, long, env = "SMUGMUG_BACKUP_THREADS")]
+        threads: Option<String>,
+
+        /// Files read (hashed, dated, RAWs rendered) at once
+        #[arg(long)]
+        read_threads: Option<usize>,
+
+        /// Show what would be uploaded, by date, without reading files in
+        /// full or touching SmugMug
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+
+        /// How to handle RAW files, overriding `raw_mode` in the config
         #[arg(long, value_enum)]
         raw: Option<config::RawMode>,
     },
@@ -1568,11 +1635,93 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Backup {
+            sources,
+            folder,
+            excludes,
+            interval,
+            once,
+            threads,
+            read_threads,
+            dry_run,
+            raw,
+        } => {
+            let cfg = config::load_config()?;
+            let backup = &cfg.backup;
+            // Blank values (an unset field in a container template) count as
+            // not given.
+            let sources: Vec<std::path::PathBuf> = sources
+                .into_iter()
+                .filter(|s| !s.as_os_str().is_empty())
+                .collect();
+            let excludes: Vec<String> = excludes
+                .into_iter()
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect();
+            let folder = folder.filter(|f| !f.trim().is_empty());
+            let interval = interval.filter(|i| !i.trim().is_empty());
+            let threads: Option<usize> = threads
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| {
+                    t.trim()
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("Invalid thread count '{}'", t))
+                })
+                .transpose()?;
+            let sources = if sources.is_empty() {
+                backup.sources.clone()
+            } else {
+                sources
+            };
+            if sources.is_empty() {
+                anyhow::bail!(
+                    "Nothing to back up: give directories on the command line or set sources in the [backup] section of the config"
+                );
+            }
+            let interval = if once {
+                None
+            } else {
+                interval
+                    .or_else(|| backup.interval.clone())
+                    .map(|i| backup::parse_interval(&i))
+                    .transpose()?
+            };
+            let raw_mode = raw.unwrap_or(cfg.upload.raw_mode);
+            let options = dated::RunOptions {
+                sources,
+                excludes: backup.exclude.iter().cloned().chain(excludes).collect(),
+                root_folder: folder.unwrap_or_else(|| backup.folder.clone()),
+                root_privacy: Some("Private"),
+                upload_threads: threads
+                    .or(backup.upload_threads)
+                    .unwrap_or(cfg.upload.threads),
+                read_threads: read_threads
+                    .or(backup.read_threads)
+                    .unwrap_or(cfg.upload.read_threads),
+                dry_run,
+                no_cache: false,
+                raw_handling: raw_mode.handling(cfg.upload.has_smugmug_source),
+                live_photo_videos: backup
+                    .live_photo_videos
+                    .unwrap_or(cfg.upload.live_photo_videos),
+                retry_attempts: cfg.upload.retry_attempts,
+                cache_path: upload_cache_dir()?,
+            };
+            let client = std::sync::Arc::new(api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            ));
+            backup::run(client, options, interval).await?;
+        }
         Commands::Upload {
             path,
             threads,
             album,
             parent,
+            excludes,
             structure,
             interactive,
             dry_run,
@@ -1589,9 +1738,47 @@ async fn main() -> Result<()> {
                 cfg.auth.access_token_secret,
             ));
 
-            // With no album, folder or mode given, upload to this month's album
-            // in the default folder.
+            // With no album, folder or mode given, upload into albums by the
+            // day each file was taken, in the default folder.
             let use_default_destination = album.is_none() && !structure && !interactive;
+            if use_default_destination {
+                let options = dated::RunOptions {
+                    sources: vec![std::path::PathBuf::from(&path)],
+                    excludes,
+                    root_folder: parent
+                        .clone()
+                        .unwrap_or_else(|| cfg.upload.default_folder.clone()),
+                    // The default folder is created private; a --parent
+                    // folder keeps SmugMug's default privacy, as before.
+                    root_privacy: parent.is_none().then_some("Private"),
+                    upload_threads: threads,
+                    read_threads: cfg.upload.read_threads,
+                    dry_run,
+                    no_cache,
+                    raw_handling: raw_mode.handling(cfg.upload.has_smugmug_source),
+                    live_photo_videos: cfg.upload.live_photo_videos,
+                    retry_attempts: cfg.upload.retry_attempts,
+                    cache_path: upload_cache_dir()?,
+                };
+                println!("Uploading from: {}", path);
+                println!(
+                    "Into: {}/YYYY/MM/YYYY-MM-DD (by the day each was taken)",
+                    options.root_folder
+                );
+                if dry_run {
+                    println!("DRY RUN - nothing will be uploaded");
+                }
+                let stop = dated::stop_on_signal();
+                let stats = dated::run(client, &options, &stop).await?;
+                dated::print_summary(&stats, &options);
+                println!("  Duration: {}", format_duration(stats.duration_secs));
+                return Ok(());
+            }
+            if !excludes.is_empty() {
+                anyhow::bail!(
+                    "--exclude only works for uploads by date (without --album or --structure)"
+                );
+            }
 
             // Determine upload mode and album name
             let (upload_mode, album_name) = if structure {
@@ -1599,11 +1786,6 @@ async fn main() -> Result<()> {
             } else if let Some(name) = album {
                 // Album specified via CLI, use single album mode
                 (UploadMode::SingleAlbum, name)
-            } else if use_default_destination {
-                (
-                    UploadMode::SingleAlbum,
-                    chrono::Local::now().format("%Y-%m").to_string(),
-                )
             } else {
                 // --interactive: prompt user
                 use dialoguer::{Input, Select};
@@ -1643,11 +1825,7 @@ async fn main() -> Result<()> {
             };
 
             // Folder the album series lives in, if any
-            let folder_path = if use_default_destination && parent.is_none() {
-                Some(cfg.upload.default_folder.clone())
-            } else {
-                parent.clone()
-            };
+            let folder_path = parent.clone();
 
             println!("Uploading from: {}", path);
             if matches!(upload_mode, UploadMode::SingleAlbum) {
@@ -1663,17 +1841,7 @@ async fn main() -> Result<()> {
                 println!();
             }
 
-            // Get cache directory (used by both upload modes)
-            let cache_path = if let Some(proj_dirs) =
-                directories::ProjectDirs::from("com", "smugmug-cli", "smugmug-cli")
-            {
-                proj_dirs.cache_dir().to_path_buf()
-            } else {
-                std::path::PathBuf::from(".cache")
-            };
-
-            // Create cache directory if it doesn't exist
-            std::fs::create_dir_all(&cache_path)?;
+            let cache_path = upload_cache_dir()?;
 
             // Handle upload based on mode
             match upload_mode {
@@ -1710,11 +1878,7 @@ async fn main() -> Result<()> {
                     // before.
                     let scope = if let Some(ref folder) = folder_path {
                         println!("Finding/creating folder path: {}", folder);
-                        let privacy = if use_default_destination && parent.is_none() {
-                            Some("Private")
-                        } else {
-                            None
-                        };
+                        let privacy = None;
                         let found = if dry_run {
                             client.find_folder_path(folder).await
                         } else {

@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>smugmug-cli</Name>
+  <Repository>ghcr.io/jhofker/smugmug-cli:latest</Repository>
+  <Registry>https://github.com/jhofker/smugmug-cli/pkgs/container/smugmug-cli</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/jhofker/smugmug-cli/issues</Support>
+  <Project>https://github.com/jhofker/smugmug-cli</Project>
+  <ReadMe>https://raw.githubusercontent.com/jhofker/smugmug-cli/main/README.md</ReadMe>
+  <Overview>Backs up a photo library to SmugMug on a schedule. Every photo and video under the Photos path goes into a private album for the day it was taken (Backup/2014/07/2014-07-12), dated from its EXIF or video metadata, its file name, or its modified time.&#xD;
+&#xD;
+After the first run, unchanged files are only checked by size and modified time (never re-read), so later runs are cheap on disks and CPU, and a run over an unchanged library makes no requests to SmugMug. Identical copies are uploaded once, edited files replace their image, RAW files are uploaded as JPEGs rendered from their embedded preview unless you have SmugMug Source, and nothing is ever deleted from SmugMug.&#xD;
+&#xD;
+You need a SmugMug API key and secret (https://api.smugmug.com/api/developer/apply) and an access token and secret for your account; running smugmug-cli auth on any computer gets you the token. The container runs at low CPU and I/O priority. See the README for exclude patterns and the .smugmugignore file.</Overview>
+  <Category>Backup: Cloud: MediaApp:Photos</Category>
+  <ExtraSearchTerms>smugmug photos backup upload pictures</ExtraSearchTerms>
+  <Requires>A SmugMug account, API key and access token</Requires>
+  <TemplateURL>https://raw.githubusercontent.com/jhofker/smugmug-cli/main/unraid/templates/smugmug-cli.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/jhofker/smugmug-cli/main/unraid/icon.png</Icon>
+  <ExtraParams>--stop-timeout=60</ExtraParams>
+  <PostArgs>backup /photos</PostArgs>
+  <License>MIT</License>
+
+  <Config Name="Photos" Target="/photos" Default="" Mode="ro" Description="The folder to back up (mounted read-only). To back up only some folders, add more paths under /photos (e.g. /photos/family)." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Cache" Target="/home/smugmug/.cache/smugmug-cli" Default="/mnt/user/appdata/smugmug-cli/cache" Mode="rw" Description="What has been uploaded already. Must persist: it's what lets later runs skip unchanged files." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/smugmug-cli/cache</Config>
+
+  <Config Name="SmugMug API key" Target="SMUGMUG_API_KEY" Default="" Description="From https://api.smugmug.com/api/developer/apply" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="SmugMug API secret" Target="SMUGMUG_API_SECRET" Default="" Description="From https://api.smugmug.com/api/developer/apply" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="SmugMug access token" Target="SMUGMUG_ACCESS_TOKEN" Default="" Description="Run smugmug-cli auth on any computer to get one" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="SmugMug access token secret" Target="SMUGMUG_ACCESS_TOKEN_SECRET" Default="" Description="Comes with the access token" Type="Variable" Display="always" Required="true" Mask="true"/>
+
+  <Config Name="SmugMug folder" Target="SMUGMUG_BACKUP_FOLDER" Default="Backup" Description="SmugMug folder the year/month/day albums go in (created private)" Type="Variable" Display="always" Required="false" Mask="false">Backup</Config>
+  <Config Name="Interval" Target="SMUGMUG_BACKUP_INTERVAL" Default="6h" Description="Time between the end of one backup and the start of the next, e.g. 30m, 6h, 1d" Type="Variable" Display="always" Required="false" Mask="false">6h</Config>
+  <Config Name="Exclude" Target="SMUGMUG_BACKUP_EXCLUDE" Default="" Description="Paths to leave out, comma-separated, in .gitignore syntax relative to /photos (e.g. old_backup/, **/Screenshots/)" Type="Variable" Display="always" Required="false" Mask="false"/>
+
+  <Config Name="Upload threads" Target="SMUGMUG_BACKUP_THREADS" Default="4" Description="Uploads at once" Type="Variable" Display="advanced" Required="false" Mask="false">4</Config>
+  <Config Name="Config" Target="/home/smugmug/.config/smugmug-cli" Default="/mnt/user/appdata/smugmug-cli/config" Mode="rw" Description="Optional config.toml for settings not offered here (read threads, RAW handling, Live Photo videos)" Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/appdata/smugmug-cli/config</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Description="User ID to run as" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Description="Group ID to run as" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="CPU priority" Target="NICE" Default="10" Description="nice level (0-19); empty for normal priority" Type="Variable" Display="advanced" Required="false" Mask="false">10</Config>
+  <Config Name="I/O priority class" Target="IONICE_CLASS" Default="3" Description="ionice class: 3 = idle, 2 = best effort; empty for normal priority" Type="Variable" Display="advanced" Required="false" Mask="false">3</Config>
+</Container>
