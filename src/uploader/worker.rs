@@ -35,6 +35,8 @@ pub struct UploadWorkerContext {
     /// instead of as originals.
     pub render_raw: bool,
     pub skip_raw_files: Arc<std::sync::atomic::AtomicBool>,
+    /// SHA-256 of files already hashed before the upload (see `collect`).
+    pub known_hashes: Option<Arc<std::collections::HashMap<std::path::PathBuf, String>>>,
 }
 
 /// Determines if an error is retryable (transient) or permanent
@@ -71,7 +73,14 @@ pub async fn upload_worker(
 
     // Calculate file hash (SHA256 for local cache). For a rendered RAW this
     // is the RAW file's hash, so re-runs skip it without rendering again.
-    let hash = calculate_file_hash(file_path).with_context(|| "Failed to calculate file hash")?;
+    let known_hash = context
+        .known_hashes
+        .as_ref()
+        .and_then(|hashes| hashes.get(file_path).cloned());
+    let hash = match known_hash {
+        Some(hash) => hash,
+        None => calculate_file_hash(file_path).with_context(|| "Failed to calculate file hash")?,
+    };
 
     // Check local cache first (unless no_cache is enabled)
     if !context.no_cache {
@@ -497,6 +506,7 @@ mod tests {
             retry_attempts: 3,
             render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -554,6 +564,7 @@ mod tests {
             retry_attempts: 3,
             render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -600,6 +611,7 @@ mod tests {
             retry_attempts: 3,
             render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -671,6 +683,7 @@ mod tests {
             retry_attempts: 3,
             render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         });
 
         // No local cache entry, but the remote image with the same filename
@@ -728,6 +741,7 @@ mod tests {
             retry_attempts: 3,
             render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         });
 
         let result = upload_worker(file.path(), context).await.unwrap();
@@ -782,6 +796,7 @@ mod tests {
             retry_attempts: 1,
             render_raw: true,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         });
         (context, temp_dir)
     }
@@ -952,6 +967,7 @@ mod tests {
             retry_attempts: 3,
             render_raw: false,
             skip_raw_files: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            known_hashes: None,
         };
 
         assert_eq!(context.album_uri, "/api/v2/album/ABC123");

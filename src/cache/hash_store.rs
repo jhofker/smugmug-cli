@@ -56,6 +56,15 @@ impl HashStore {
         Ok(())
     }
 
+    /// Forget one file, e.g. when the image it points to no longer exists
+    pub fn remove(&self, hash: &str) -> Result<()> {
+        self.db
+            .remove(hash.as_bytes())
+            .context("Failed to remove from database")?;
+        self.db.flush().context("Failed to flush database")?;
+        Ok(())
+    }
+
     /// Clear all entries from the cache
     pub fn clear(&self) -> Result<()> {
         self.db.clear().context("Failed to clear database")?;
