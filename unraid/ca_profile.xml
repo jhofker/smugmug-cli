@@ -1,0 +1,7 @@
+<CommunityApplications>
+  <Profile>
+    smugmug-cli: back up an Unraid photo share to SmugMug, into private albums by the day each photo was taken, on a schedule. Questions and problems: open an issue at https://github.com/jhofker/smugmug-cli/issues.
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/jhofker/smugmug-cli/main/unraid/icon.png</Icon>
+  <WebPage>https://github.com/jhofker/smugmug-cli</WebPage>
+</CommunityApplications>
