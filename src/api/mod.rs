@@ -82,7 +82,9 @@ impl SmugMugClient {
                 .connect_timeout(CONNECT_TIMEOUT)
                 .read_timeout(READ_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                // Fails only if TLS can't be initialized, where
+                // reqwest::Client::new() would panic too.
+                .expect("Failed to set up the HTTP client (TLS initialization failed)"),
             api_key,
             api_secret,
             access_token,
