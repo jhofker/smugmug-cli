@@ -18,8 +18,9 @@ RUN cargo build --release --locked
 # Runtime stage - use Alpine for minimal size
 FROM alpine:latest
 
-# Install runtime dependencies including su-exec for privilege dropping
-RUN apk add --no-cache ca-certificates libgcc su-exec
+# Install runtime dependencies: su-exec for privilege dropping, tzdata so TZ
+# sets the time zone videos are dated in, util-linux for ionice
+RUN apk add --no-cache ca-certificates libgcc su-exec tzdata util-linux
 
 # Copy binary from builder
 COPY --from=builder /usr/src/smugmug-cli/target/release/smugmug-cli /usr/local/bin/smugmug-cli

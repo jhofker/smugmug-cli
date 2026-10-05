@@ -1,6 +1,8 @@
 pub mod api;
+pub mod backup;
 pub mod cache;
 pub mod config;
+pub mod dated;
 pub mod downloader;
 pub mod raw;
 pub mod scanner;

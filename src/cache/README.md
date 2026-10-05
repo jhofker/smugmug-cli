@@ -62,12 +62,13 @@ Module exports and utility functions.
 
 #### `get_cache_path() -> Result<PathBuf>`
 
-Returns the platform-specific cache directory path using the `directories` crate.
+Returns the cache directory `upload` and `backup` use (the sled database holding the hash
+store and file index, plus `last_run.json`), via the `directories` crate.
 
 **Locations:**
-- Linux: `~/.cache/smugmug-cli/hash_store`
-- macOS: `~/Library/Caches/com.jhofker.smugmug-cli/hash_store`
-- Windows: `%LOCALAPPDATA%\jhofker\smugmug-cli\cache\hash_store`
+- Linux: `~/.cache/smugmug-cli`
+- macOS: `~/Library/Caches/com.smugmug-cli.smugmug-cli`
+- Windows: `%LOCALAPPDATA%\smugmug-cli\smugmug-cli\cache`
 
 #### `clear_cache() -> Result<()>`
 

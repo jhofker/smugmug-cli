@@ -16,12 +16,50 @@ pub struct NodeTree {
     pub children: Vec<NodeTree>,
 }
 
+/// Tries per API request (see `send_retrying`).
+const MAX_ATTEMPTS: u32 = 5;
+
+/// 1s, 2s, 4s, 8s, ... plus up to half a second of jitter so concurrent
+/// workers don't retry in lockstep.
+fn backoff(attempt: u32) -> std::time::Duration {
+    let jitter = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_millis() % 500)
+        .unwrap_or(0);
+    std::time::Duration::from_millis(
+        1000 * 2u64.pow(attempt.saturating_sub(1).min(6)) + jitter as u64,
+    )
+}
+
+/// The wait a 429/503 response asks for, in seconds (capped at 10 minutes).
+fn retry_after(response: &reqwest::Response) -> Option<std::time::Duration> {
+    let secs: u64 = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(std::time::Duration::from_secs(secs.min(600)))
+}
+
 pub struct SmugMugClient {
     client: reqwest::Client,
     api_key: String,
     api_secret: String,
     access_token: String,
     access_token_secret: String,
+    /// The authenticated user's nickname and root node URI, fetched once.
+    auth_user: tokio::sync::OnceCell<AuthUser>,
+}
+
+/// Who the client is signed in as.
+#[derive(Debug, Clone)]
+pub struct AuthUser {
+    pub nickname: String,
+    /// URI of the root folder node.
+    pub root_node_uri: String,
 }
 
 impl SmugMugClient {
@@ -37,7 +75,13 @@ impl SmugMugClient {
             api_secret,
             access_token,
             access_token_secret,
+            auth_user: tokio::sync::OnceCell::new(),
         }
+    }
+
+    /// The HTTP client, so uploads reuse its connections.
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.client
     }
 
     pub fn build_oauth_header(&self, method: &str, url: &str) -> String {
@@ -200,20 +244,24 @@ impl SmugMugClient {
                 anyhow::bail!("Gave up listing {} after 10,000 pages", first_url);
             }
 
-            let oauth_header = self.build_oauth_header_with_query(
-                "GET",
-                &url,
-                &oauth::ParameterList::new(params.clone()),
-            );
-            let mut headers = HeaderMap::new();
-            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-            headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-            let mut request = self.client.get(&url).headers(headers);
-            if !params.is_empty() {
-                request = request.query(&params);
-            }
-            let response = request.send().await?;
+            let response = self
+                .send_retrying(true, || {
+                    // A fresh signature (nonce, timestamp) for each attempt.
+                    let oauth_header = self.build_oauth_header_with_query(
+                        "GET",
+                        &url,
+                        &oauth::ParameterList::new(params.clone()),
+                    );
+                    let mut headers = HeaderMap::new();
+                    headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+                    headers.insert("Accept", HeaderValue::from_static("application/json"));
+                    let mut request = self.client.get(&url).headers(headers);
+                    if !params.is_empty() {
+                        request = request.query(&params);
+                    }
+                    Ok(request)
+                })
+                .await?;
             let status = response.status();
             let body_text = response.text().await?;
             if !status.is_success() {
@@ -242,13 +290,14 @@ impl SmugMugClient {
     }
 
     pub async fn get_with_auth(&self, url: &str) -> Result<reqwest::Response> {
-        let oauth_header = self.build_oauth_header("GET", url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        Ok(self.client.get(url).headers(headers).send().await?)
+        self.send_retrying(true, || {
+            let oauth_header = self.build_oauth_header("GET", url);
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+            headers.insert("Accept", HeaderValue::from_static("application/json"));
+            Ok(self.client.get(url).headers(headers))
+        })
+        .await
     }
 
     pub async fn post_with_auth(
@@ -256,20 +305,48 @@ impl SmugMugClient {
         url: &str,
         body: serde_json::Value,
     ) -> Result<reqwest::Response> {
-        let oauth_header = self.build_oauth_header("POST", url);
+        self.send_retrying(false, || {
+            let oauth_header = self.build_oauth_header("POST", url);
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+            headers.insert("Accept", HeaderValue::from_static("application/json"));
+            headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+            Ok(self.client.post(url).headers(headers).json(&body))
+        })
+        .await
+    }
 
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-        headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-
-        Ok(self
-            .client
-            .post(url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await?)
+    /// Send a request, retrying when SmugMug is rate limiting (429) or the
+    /// connection failed, waiting as `Retry-After` says or backing off
+    /// exponentially. Server errors (5xx) are retried only for `idempotent`
+    /// requests: a POST that failed with one may still have created what it
+    /// asked for. `make` builds the request afresh for each attempt (OAuth
+    /// signatures can't be reused).
+    async fn send_retrying(
+        &self,
+        idempotent: bool,
+        make: impl Fn() -> Result<reqwest::RequestBuilder>,
+    ) -> Result<reqwest::Response> {
+        let mut attempt = 1;
+        loop {
+            let last = attempt >= MAX_ATTEMPTS;
+            match make()?.send().await {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry = status == 429 || (idempotent && status >= 500);
+                    if !retry || last {
+                        return Ok(response);
+                    }
+                    let wait = retry_after(&response).unwrap_or_else(|| backoff(attempt));
+                    tokio::time::sleep(wait).await;
+                }
+                Err(e) if !last && (e.is_connect() || (idempotent && e.is_timeout())) => {
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+            attempt += 1;
+        }
     }
 
     pub async fn delete_with_auth(&self, url: &str) -> Result<reqwest::Response> {
@@ -354,6 +431,54 @@ mod tests {
         second.assert_async().await;
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_requests_are_retried() {
+        let mut server = mockito::Server::new_async().await;
+        let limited = server
+            .mock("GET", "/api/v2/thing!items")
+            .with_status(429)
+            .with_header("retry-after", "0")
+            .expect(1)
+            .create_async()
+            .await;
+        let ok = server
+            .mock("GET", "/api/v2/thing!items")
+            .with_body(r#"{"Response":{"Item":[{"Name":"a"}]}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = create_test_client();
+        let items: Vec<Item> = client
+            .get_all_pages(&format!("{}/api/v2/thing!items", server.url()), "Item")
+            .await
+            .unwrap();
+        limited.assert_async().await;
+        ok.assert_async().await;
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_posts_are_not_retried_on_server_errors() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v2/node/x!children")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+        let client = create_test_client();
+        let response = client
+            .post_with_auth(
+                &format!("{}/api/v2/node/x!children", server.url()),
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 500);
+        mock.assert_async().await;
     }
 
     #[tokio::test]

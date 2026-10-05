@@ -55,9 +55,15 @@ colored = "3.1"
 # Async runtime
 tokio = { version = "1.53", features = ["full"] }
 rayon = "1.12"
+# Streaming upload bodies from disk
+tokio-util = { version = "0.7", features = ["io"] }
+# Running upload workers concurrently in one task (already pulled in by reqwest)
+futures-util = "0.3"
 
 # File operations
 walkdir = "2.5"
+# Walking with exclude globs and .smugmugignore files (src/dated/scan.rs)
+ignore = "0.4"
 sha2 = "0.11"
 mime_guess = "2.0"
 
@@ -79,6 +85,8 @@ dotenvy = "0.15"
 # LGPL-2.1: see THIRD-PARTY-NOTICES.md. 0.8 needs Rust 1.89.
 rawler = "0.8"
 little_exif = "0.6"
+# Capture dates from JPEG/HEIC/PNG/TIFF EXIF (src/dated/date.rs)
+kamadak-exif = "0.6"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]

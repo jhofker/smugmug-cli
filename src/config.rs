@@ -10,6 +10,8 @@ pub struct Config {
     pub auth: AuthConfig,
     pub upload: UploadConfig,
     pub deduplication: DeduplicationConfig,
+    #[serde(default)]
+    pub backup: BackupConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,6 +36,68 @@ pub struct UploadConfig {
     /// What to do with RAW files (see `RawMode`).
     #[serde(default)]
     pub raw_mode: RawMode,
+    /// Files read (hashed, dated, RAWs rendered) at once. Uploads don't
+    /// wait on reads, so a couple are enough to keep them busy without
+    /// thrashing spinning disks.
+    #[serde(default = "default_read_threads")]
+    pub read_threads: usize,
+    /// What to do with the video half of a Live Photo (see
+    /// `LivePhotoVideos`).
+    #[serde(default)]
+    pub live_photo_videos: LivePhotoVideos,
+}
+
+/// The video half of a Live Photo: a short video with the same name as a
+/// photo next to it (`IMG_1234.HEIC` + `IMG_1234.MOV`). SmugMug shows it as
+/// a separate video.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LivePhotoVideos {
+    /// Upload it, into the same day album as its photo
+    #[default]
+    Upload,
+    /// Leave it out
+    Skip,
+}
+
+fn default_read_threads() -> usize {
+    2
+}
+
+/// `smugmug-cli backup`: what to back up, where to, and how often.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackupConfig {
+    /// Directories to back up.
+    pub sources: Vec<PathBuf>,
+    /// SmugMug folder the year/month/day albums go in. Created private.
+    pub folder: String,
+    /// Paths to leave out, in .gitignore syntax, relative to each source
+    /// (e.g. "old_backup/", "**/Thumbs.db").
+    pub exclude: Vec<String>,
+    /// Time between the end of one run and the start of the next (e.g.
+    /// "6h", "30m", "1d"). Without it, `backup` runs once.
+    pub interval: Option<String>,
+    /// Overrides `upload.threads` for backups.
+    pub upload_threads: Option<usize>,
+    /// Overrides `upload.read_threads` for backups.
+    pub read_threads: Option<usize>,
+    /// Overrides `upload.live_photo_videos` for backups.
+    pub live_photo_videos: Option<LivePhotoVideos>,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        BackupConfig {
+            sources: Vec::new(),
+            folder: "Backup".to_string(),
+            exclude: Vec::new(),
+            interval: None,
+            upload_threads: None,
+            read_threads: None,
+            live_photo_videos: None,
+        }
+    }
 }
 
 /// How `upload` treats RAW files. Uploading RAW originals needs a SmugMug
@@ -102,11 +166,14 @@ impl Default for Config {
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
                 raw_mode: RawMode::default(),
+                read_threads: default_read_threads(),
+                live_photo_videos: LivePhotoVideos::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
                 cache_path: cache_dir.join("hashes.db"),
             },
+            backup: BackupConfig::default(),
         }
     }
 }
@@ -435,6 +502,35 @@ pub async fn auth_command() -> Result<()> {
 pub fn load_config() -> Result<Config> {
     let config_path = get_config_path()?;
 
+    // Credentials in the environment (as a container gets them) work with
+    // or without a config file, and win over the file's.
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let env_auth = (
+        env("SMUGMUG_API_KEY"),
+        env("SMUGMUG_API_SECRET"),
+        env("SMUGMUG_ACCESS_TOKEN"),
+        env("SMUGMUG_ACCESS_TOKEN_SECRET"),
+    );
+    let apply_env = |mut config: Config| {
+        if let Some(v) = env_auth.0.clone() {
+            config.auth.api_key = v;
+        }
+        if let Some(v) = env_auth.1.clone() {
+            config.auth.api_secret = v;
+        }
+        if let Some(v) = env_auth.2.clone() {
+            config.auth.access_token = v;
+        }
+        if let Some(v) = env_auth.3.clone() {
+            config.auth.access_token_secret = v;
+        }
+        config
+    };
+
+    if !config_path.exists() && env_auth.0.is_some() && env_auth.2.is_some() {
+        return Ok(apply_env(Config::default()));
+    }
+
     if !config_path.exists() {
         anyhow::bail!(
             "Config file not found at: {}\n\n\
@@ -448,7 +544,7 @@ pub fn load_config() -> Result<Config> {
 
     let config: Config = toml::from_str(&contents).context("Failed to parse config file")?;
 
-    Ok(config)
+    Ok(apply_env(config))
 }
 
 pub fn save_config(config: &Config) -> Result<()> {
@@ -495,11 +591,14 @@ mod tests {
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
                 raw_mode: RawMode::default(),
+                read_threads: default_read_threads(),
+                live_photo_videos: LivePhotoVideos::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
                 cache_path: PathBuf::from("/tmp/test_cache.db"),
             },
+            backup: BackupConfig::default(),
         }
     }
 
@@ -932,6 +1031,8 @@ cache_path = "/absolute/path/cache.db"
             has_smugmug_source: false,
             default_folder: default_upload_folder(),
             raw_mode: RawMode::default(),
+            read_threads: 2,
+            live_photo_videos: LivePhotoVideos::default(),
         };
 
         let debug_string = format!("{:?}", upload);
@@ -967,11 +1068,14 @@ cache_path = "/absolute/path/cache.db"
                 has_smugmug_source: false,
                 default_folder: default_upload_folder(),
                 raw_mode: RawMode::default(),
+                read_threads: default_read_threads(),
+                live_photo_videos: LivePhotoVideos::default(),
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
                 cache_path: PathBuf::from("/custom/cache.db"),
             },
+            backup: BackupConfig::default(),
         };
 
         assert_eq!(config.auth.api_key, "test_key");

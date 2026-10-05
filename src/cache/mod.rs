@@ -6,12 +6,13 @@ pub mod hash_store;
 
 pub use hash_store::HashStore;
 
-/// Get the default cache directory path
+/// The cache directory `upload` and `backup` use: the hash store and file
+/// index (one sled database), and `last_run.json`.
 pub fn get_cache_path() -> Result<PathBuf> {
-    let project_dirs = ProjectDirs::from("com", "jhofker", "smugmug-cli")
-        .context("Failed to determine project directories")?;
-
-    let cache_dir = project_dirs.cache_dir().join("hash_store");
+    let cache_dir = match ProjectDirs::from("com", "smugmug-cli", "smugmug-cli") {
+        Some(dirs) => dirs.cache_dir().to_path_buf(),
+        None => PathBuf::from(".cache"),
+    };
 
     // Ensure the cache directory exists
     std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;

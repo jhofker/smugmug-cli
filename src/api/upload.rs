@@ -192,52 +192,162 @@ async fn send_upload(
     target_uri: &str,
     payload: &UploadPayload,
 ) -> Result<UploadResult> {
-    let file_data = payload.data.clone();
-    let file_size = file_data.len();
-    let mime_type = &payload.mime_type;
-    let filename = payload.file_name.as_str();
-
-    // 1. Calculate MD5 checksum (base64-encoded)
     let mut context = Context::new();
-    context.consume(&file_data);
-    let md5_hash = context.finalize();
-    let md5_base64 = general_purpose::STANDARD.encode(md5_hash.0);
+    context.consume(&payload.data);
+    let md5_base64 = general_purpose::STANDARD.encode(context.finalize().0);
+    let headers = upload_headers(
+        client,
+        target_header,
+        target_uri,
+        payload.data.len() as u64,
+        &md5_base64,
+        &payload.mime_type,
+        &payload.file_name,
+    )?;
+    let response = client
+        .http()
+        .post(UPLOAD_URL)
+        .headers(headers)
+        .body(payload.data.clone())
+        .send()
+        .await?;
+    read_upload_response(response).await
+}
 
-    // 2. Build OAuth header for upload endpoint
-    let upload_url = "https://upload.smugmug.com/";
-    let oauth_header = client.build_oauth_header("POST", upload_url);
+/// SmugMug's upload endpoint.
+const UPLOAD_URL: &str = "https://upload.smugmug.com/";
 
-    // 3. Build headers
+/// Who an upload goes to: a new image in an album, or new content for an
+/// existing image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadTarget<'a> {
+    Album(&'a str),
+    ReplaceImage(&'a str),
+}
+
+/// A file uploaded straight from disk, without holding it in memory.
+#[derive(Debug, Clone)]
+pub struct FileUpload<'a> {
+    pub path: &'a Path,
+    /// Size of the file, as sent in Content-Length.
+    pub size: u64,
+    /// Hex MD5 of the file, computed when it was read.
+    pub md5_hex: &'a str,
+    /// Name SmugMug records (usually the file's own).
+    pub file_name: &'a str,
+}
+
+/// Upload a file from disk, streaming its contents.
+pub async fn upload_file(
+    client: &crate::api::SmugMugClient,
+    target: UploadTarget<'_>,
+    file: &FileUpload<'_>,
+) -> Result<UploadResult> {
+    let (target_header, target_uri) = match target {
+        UploadTarget::Album(uri) => ("X-Smug-AlbumUri", uri),
+        UploadTarget::ReplaceImage(uri) => ("X-Smug-ImageUri", uri),
+    };
+    let md5 = hex::decode(file.md5_hex)?;
+    let mime_type = mime_guess::from_path(file.path)
+        .first_or_octet_stream()
+        .to_string();
+    let headers = upload_headers(
+        client,
+        target_header,
+        target_uri,
+        file.size,
+        &general_purpose::STANDARD.encode(md5),
+        &mime_type,
+        file.file_name,
+    )?;
+    let reader = fs::File::open(file.path).await?;
+    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(
+        reader,
+        256 * 1024,
+    ));
+    let response = client
+        .http()
+        .post(UPLOAD_URL)
+        .headers(headers)
+        .body(body)
+        .send()
+        .await?;
+    read_upload_response(response).await
+}
+
+/// Upload bytes held in memory (a JPEG rendered from a RAW file).
+pub async fn upload_bytes(
+    client: &crate::api::SmugMugClient,
+    target: UploadTarget<'_>,
+    payload: &UploadPayload,
+) -> Result<UploadResult> {
+    match target {
+        UploadTarget::Album(uri) => upload_image(client, uri, payload).await,
+        UploadTarget::ReplaceImage(uri) => replace_image(client, uri, payload).await,
+    }
+}
+
+fn upload_headers(
+    client: &crate::api::SmugMugClient,
+    target_header: &'static str,
+    target_uri: &str,
+    size: u64,
+    md5_base64: &str,
+    mime_type: &str,
+    filename: &str,
+) -> Result<HeaderMap> {
+    let oauth_header = client.build_oauth_header("POST", UPLOAD_URL);
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-    headers.insert(CONTENT_LENGTH, HeaderValue::from(file_size as u64));
+    headers.insert(CONTENT_LENGTH, HeaderValue::from(size));
     headers.insert(CONTENT_TYPE, HeaderValue::from_str(mime_type)?);
-    headers.insert("Content-MD5", HeaderValue::from_str(&md5_base64)?);
+    headers.insert("Content-MD5", HeaderValue::from_str(md5_base64)?);
     headers.insert(target_header, HeaderValue::from_str(target_uri)?);
-    headers.insert("X-Smug-FileName", HeaderValue::from_str(filename)?);
-    headers.insert("X-Smug-Title", HeaderValue::from_str(filename)?);
+    headers.insert("X-Smug-FileName", header_text(filename)?);
+    headers.insert("X-Smug-Title", header_text(filename)?);
     headers.insert("X-Smug-ResponseType", HeaderValue::from_static("JSON"));
     headers.insert("X-Smug-Version", HeaderValue::from_static("v2"));
     headers.insert("Accept", HeaderValue::from_static("application/json"));
+    Ok(headers)
+}
 
-    // 4. Send POST request with file data as body
-    let http_client = reqwest::Client::new();
-    let response = http_client
-        .post(upload_url)
-        .headers(headers)
-        .body(file_data)
-        .send()
-        .await?;
+/// A header value for a file name. `HeaderValue::from_str` takes ASCII
+/// only, which would fail every upload of a file named with accents or
+/// emoji; the UTF-8 bytes are sent as they are instead.
+fn header_text(text: &str) -> Result<HeaderValue> {
+    Ok(HeaderValue::from_bytes(text.as_bytes())?)
+}
 
+/// SmugMug refused an upload with an HTTP error.
+#[derive(Debug, thiserror::Error)]
+#[error("Upload failed with status {status}: {body}")]
+pub struct UploadRejected {
+    pub status: u16,
+    pub body: String,
+}
+
+impl UploadRejected {
+    /// Refused for the file itself (too big, unsupported), so trying again
+    /// won't help until the file changes. Not auth, rate-limit or
+    /// conflict errors, which are about the account or the request.
+    pub fn is_permanent(&self) -> bool {
+        matches!(self.status, 400 | 413 | 415 | 422)
+    }
+}
+
+async fn read_upload_response(response: reqwest::Response) -> Result<UploadResult> {
     let status = response.status();
     let status_code = status.as_u16();
     let body_text = response.text().await?;
 
     if !status.is_success() {
-        anyhow::bail!("Upload failed with status {}: {}", status_code, body_text);
+        return Err(UploadRejected {
+            status: status_code,
+            body: body_text,
+        }
+        .into());
     }
 
-    // 5. Parse response
     let upload_response: UploadResponse = serde_json::from_str(&body_text)?;
 
     if upload_response.stat != "ok" {
@@ -249,7 +359,7 @@ async fn send_upload(
         .image
         .image_uri
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or("")
         .to_string();
 

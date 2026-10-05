@@ -56,6 +56,39 @@ impl HashStore {
         Ok(())
     }
 
+    /// Insert without flushing. Sled flushes on its own every half second,
+    /// so a crash loses at most that much; for runs that insert many records
+    /// and call `flush` when done.
+    pub fn insert_deferred(&self, hash: &str, file: &UploadedFile) -> Result<()> {
+        let serialized = serde_json::to_vec(file).context("Failed to serialize UploadedFile")?;
+        self.db
+            .insert(hash.as_bytes(), serialized)
+            .context("Failed to insert into database")?;
+        Ok(())
+    }
+
+    /// Forget one file without flushing (see `insert_deferred`).
+    pub fn remove_deferred(&self, hash: &str) -> Result<()> {
+        self.db
+            .remove(hash.as_bytes())
+            .context("Failed to remove from database")?;
+        Ok(())
+    }
+
+    /// Write everything to disk.
+    pub fn flush(&self) -> Result<()> {
+        self.db.flush().context("Failed to flush database")?;
+        Ok(())
+    }
+
+    /// Another keyspace in the same database (e.g. the per-path file index),
+    /// since sled lets only one process open it at a time.
+    pub fn open_tree(&self, name: &str) -> Result<sled::Tree> {
+        self.db
+            .open_tree(name)
+            .with_context(|| format!("Failed to open database tree '{}'", name))
+    }
+
     /// Forget one file, e.g. when the image it points to no longer exists
     pub fn remove(&self, hash: &str) -> Result<()> {
         self.db
@@ -68,6 +101,15 @@ impl HashStore {
     /// Clear all entries from the cache
     pub fn clear(&self) -> Result<()> {
         self.db.clear().context("Failed to clear database")?;
+        // And every other keyspace (the file index), which would otherwise
+        // keep files counted as uploaded.
+        for name in self.db.tree_names() {
+            if name.as_ref() != b"__sled__default" {
+                self.db
+                    .drop_tree(&name)
+                    .context("Failed to clear database tree")?;
+            }
+        }
 
         self.db.flush().context("Failed to flush database")?;
 

@@ -27,5 +27,18 @@ adduser -D -u ${USER_ID} -G ${GROUP_NAME} smugmug >/dev/null 2>&1
 mkdir -p /home/smugmug/.config/smugmug-cli /home/smugmug/.cache/smugmug-cli >/dev/null 2>&1
 chown -R smugmug:${GROUP_NAME} /home/smugmug >/dev/null 2>&1
 
-# Drop privileges and execute the command
-exec su-exec smugmug "$@"
+# Run at low CPU priority (NICE, default 10) and, where the kernel allows,
+# idle I/O priority (IONICE_CLASS, default 3 = idle; set empty to skip), so
+# a backup yields to everything else on the host.
+PRIORITY=""
+if [ -n "${NICE-10}" ]; then
+    PRIORITY="nice -n ${NICE-10}"
+fi
+if [ -n "${IONICE_CLASS-3}" ] && command -v ionice >/dev/null 2>&1 \
+    && ionice -c "${IONICE_CLASS-3}" true 2>/dev/null; then
+    PRIORITY="$PRIORITY ionice -c ${IONICE_CLASS-3}"
+fi
+
+# Drop privileges and execute the command (exec, so it gets docker stop's
+# SIGTERM and finishes its uploads in progress)
+exec su-exec smugmug $PRIORITY "$@"

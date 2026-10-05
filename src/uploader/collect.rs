@@ -28,7 +28,7 @@ use crate::uploader::album_series::{AlbumSeries, AlbumSeriesBackend};
 use crate::uploader::worker::calculate_file_hash;
 
 /// Image URIs per `!collectimages` request.
-const COLLECT_BATCH: usize = 100;
+pub(crate) const COLLECT_BATCH: usize = 100;
 
 /// How collects reach SmugMug.
 // Only implemented and used inside this crate with concrete types, so the
@@ -67,12 +67,12 @@ pub struct CollectOutcome {
 }
 
 /// A file to collect and the image it's already on SmugMug as.
-struct Pending {
-    path: PathBuf,
-    hash: String,
-    file_size: u64,
-    image_uri: String,
-    image_key: String,
+pub(crate) struct Pending {
+    pub(crate) path: PathBuf,
+    pub(crate) hash: String,
+    pub(crate) file_size: u64,
+    pub(crate) image_uri: String,
+    pub(crate) image_key: String,
 }
 
 /// Collect the files in `files` that the cache knows are in another album
@@ -229,15 +229,15 @@ async fn collect_pending<C: CollectBackend, S: AlbumSeriesBackend>(
 }
 
 /// How one batch went.
-struct BatchOutcome {
-    collected: usize,
-    refused: Vec<Pending>,
-    failed: Vec<Pending>,
+pub(crate) struct BatchOutcome {
+    pub(crate) collected: usize,
+    pub(crate) refused: Vec<Pending>,
+    pub(crate) failed: Vec<Pending>,
 }
 
 /// Collect one batch into `album`, recording each collected file in the
 /// cache.
-async fn collect_batch<C: CollectBackend>(
+pub(crate) async fn collect_batch<C: CollectBackend>(
     batch: Vec<Pending>,
     album: &Album,
     store: &HashStore,

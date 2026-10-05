@@ -67,6 +67,59 @@ pub struct Album {
     pub image_count: Option<u64>,
 }
 
+/// One child of a folder node, as `!children` lists it.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ChildNode {
+    #[serde(rename = "Name")]
+    pub name: String,
+    /// "Folder", "Album" or "Page".
+    #[serde(rename = "Type")]
+    pub node_type: String,
+    /// Node URI.
+    #[serde(rename = "Uri")]
+    pub uri: String,
+    #[serde(rename = "NodeID", default)]
+    pub node_id: String,
+    #[serde(rename = "UrlName", default)]
+    pub url_name: String,
+    #[serde(rename = "WebUri", default)]
+    pub web_uri: Option<String>,
+    #[serde(rename = "Uris", default)]
+    pub uris: Option<ChildNodeUris>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ChildNodeUris {
+    #[serde(rename = "Album", default)]
+    pub album: Option<UriRef>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct UriRef {
+    #[serde(rename = "Uri")]
+    pub uri: String,
+}
+
+impl ChildNode {
+    /// The album this node is, if it's an album.
+    pub fn album(&self) -> Option<Album> {
+        if self.node_type != "Album" {
+            return None;
+        }
+        let album_uri = self.uris.as_ref()?.album.as_ref()?.uri.clone();
+        Some(Album {
+            album_key: album_uri.rsplit('/').next().unwrap_or("").to_string(),
+            name: self.name.clone(),
+            url_name: self.url_name.clone(),
+            node_id: self.node_id.clone(),
+            uri: album_uri,
+            web_uri: self.web_uri.clone(),
+            uris: None,
+            image_count: None,
+        })
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AlbumUris {
     #[serde(rename = "AlbumDownload", skip_serializing_if = "Option::is_none")]
@@ -227,67 +280,89 @@ impl SmugMugClient {
         Ok(albums)
     }
 
+    /// The signed-in user's nickname and root node, fetched on first use.
+    pub async fn auth_user(&self) -> Result<super::AuthUser> {
+        self.auth_user
+            .get_or_try_init(|| async {
+                let response = self
+                    .get_with_auth("https://api.smugmug.com/api/v2!authuser")
+                    .await?;
+                let status = response.status();
+                let body_text = response.text().await?;
+                if !status.is_success() {
+                    anyhow::bail!("Failed to get auth user: {} - {}", status, body_text);
+                }
+                let user_data: UserResponse = serde_json::from_str(&body_text)?;
+                Ok(super::AuthUser {
+                    nickname: user_data.response.user.nickname,
+                    root_node_uri: user_data.response.user.uris.node.uri,
+                })
+            })
+            .await
+            .cloned()
+    }
+
+    /// Every child of a folder node (folders, albums, pages), all pages.
+    pub async fn list_children(&self, node_uri: &str) -> Result<Vec<ChildNode>> {
+        self.get_all_pages(
+            &format!("https://api.smugmug.com{}!children", node_uri),
+            "Node",
+        )
+        .await
+    }
+
+    /// Create a folder named `name` in the folder node `parent_node_uri` and
+    /// return its node URI. `privacy` (Public, Unlisted or Private) is set if
+    /// given.
+    pub async fn create_folder(
+        &self,
+        parent_node_uri: &str,
+        name: &str,
+        privacy: Option<&str>,
+    ) -> Result<String> {
+        let create_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
+        let mut body = serde_json::json!({
+            "Type": "Folder",
+            "Name": name,
+        });
+        if let Some(privacy) = privacy {
+            body["Privacy"] = serde_json::json!(privacy);
+        }
+        let response = self.post_with_auth(&create_url, body).await?;
+        let status = response.status();
+        let body_text = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("Failed to create folder: {} - {}", status, body_text);
+        }
+
+        #[derive(serde::Deserialize)]
+        struct CreateNodeResponse {
+            #[serde(rename = "Response")]
+            response: CreateNodeResponseData,
+        }
+        #[derive(serde::Deserialize)]
+        struct CreateNodeResponseData {
+            #[serde(rename = "Node")]
+            node: FolderNodeInfo,
+        }
+        #[derive(serde::Deserialize)]
+        struct FolderNodeInfo {
+            #[serde(rename = "Uri")]
+            uri: String,
+        }
+        let node_response: CreateNodeResponse = serde_json::from_str(&body_text)?;
+        Ok(node_response.response.node.uri)
+    }
+
     pub async fn create_album(
         &self,
         name: &str,
         parent_node_uri: Option<&str>,
         privacy: &str,
     ) -> Result<Album> {
-        // Get the parent node URI and user nickname (default to user's root node)
-        let (parent_uri, user_nickname) = if let Some(uri) = parent_node_uri {
-            // If parent URI is provided, we still need to get the nickname
-            let auth_user_url = "https://api.smugmug.com/api/v2!authuser";
-            let oauth_header = self.build_oauth_header("GET", auth_user_url);
-
-            let mut headers = HeaderMap::new();
-            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-            headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-            let response = self
-                .client
-                .get(auth_user_url)
-                .headers(headers)
-                .send()
-                .await?;
-
-            let status = response.status();
-            let body_text = response.text().await?;
-
-            if !status.is_success() {
-                anyhow::bail!("Failed to get auth user: {} - {}", status, body_text);
-            }
-
-            let user_data: UserResponse = serde_json::from_str(&body_text)?;
-            (uri.to_string(), user_data.response.user.nickname)
-        } else {
-            // Get the authenticated user's root node
-            let auth_user_url = "https://api.smugmug.com/api/v2!authuser";
-            let oauth_header = self.build_oauth_header("GET", auth_user_url);
-
-            let mut headers = HeaderMap::new();
-            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-            headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-            let response = self
-                .client
-                .get(auth_user_url)
-                .headers(headers)
-                .send()
-                .await?;
-
-            let status = response.status();
-            let body_text = response.text().await?;
-
-            if !status.is_success() {
-                anyhow::bail!("Failed to get auth user: {} - {}", status, body_text);
-            }
-
-            let user_data: UserResponse = serde_json::from_str(&body_text)?;
-            (
-                user_data.response.user.uris.node.uri,
-                user_data.response.user.nickname,
-            )
-        };
+        let user = self.auth_user().await?;
+        let parent_uri = parent_node_uri.unwrap_or(&user.root_node_uri).to_string();
+        let user_nickname = user.nickname;
 
         // Create the album by POSTing to the parent node's children
         let create_url = format!("https://api.smugmug.com{}!children", parent_uri);
@@ -631,24 +706,7 @@ impl SmugMugClient {
         privacy: Option<&str>,
         create_missing: bool,
     ) -> Result<Option<String>> {
-        // Get the root node URI
-        let auth_user_url = "https://api.smugmug.com/api/v2!authuser";
-        let oauth_header = self.build_oauth_header("GET", auth_user_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self
-            .client
-            .get(auth_user_url)
-            .headers(headers)
-            .send()
-            .await?;
-
-        let body_text = response.text().await?;
-        let user_data: UserResponse = serde_json::from_str(&body_text)?;
-        let mut current_node_uri = user_data.response.user.uris.node.uri;
+        let mut current_node_uri = self.auth_user().await?.root_node_uri;
 
         // Split the path and create/find each folder
         let path_parts: Vec<&str> = folder_path.split('/').filter(|s| !s.is_empty()).collect();
@@ -763,57 +821,9 @@ impl SmugMugClient {
         }
 
         // Folder doesn't exist, create it
-        let create_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
-        let oauth_header = self.build_oauth_header("POST", &create_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-        headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-
-        let mut body = serde_json::json!({
-            "Type": "Folder",
-            "Name": folder_name,
-        });
-        if let Some(privacy) = privacy {
-            body["Privacy"] = serde_json::json!(privacy);
-        }
-
-        let response = self
-            .client
-            .post(&create_url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_text = response.text().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Failed to create folder: {} - {}", status, body_text);
-        }
-
-        #[derive(serde::Deserialize)]
-        struct CreateNodeResponse {
-            #[serde(rename = "Response")]
-            response: CreateNodeResponseData,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct CreateNodeResponseData {
-            #[serde(rename = "Node")]
-            node: FolderNodeInfo,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct FolderNodeInfo {
-            #[serde(rename = "Uri")]
-            uri: String,
-        }
-
-        let node_response: CreateNodeResponse = serde_json::from_str(&body_text)?;
-        Ok(Some(node_response.response.node.uri))
+        self.create_folder(parent_node_uri, folder_name, privacy)
+            .await
+            .map(Some)
     }
 
     pub async fn get_album(&self, album_key: &str) -> Result<Album> {
