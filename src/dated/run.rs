@@ -794,7 +794,7 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
                 .await
             {
                 Ok(result) => return Ok(result),
-                Err(e) if attempt < attempts && is_transient(&e) => {
+                Err(e) if attempt < attempts && is_transient(&e, target) => {
                     tokio::time::sleep(Duration::from_secs(2u64.pow(attempt))).await;
                     attempt += 1;
                 }
@@ -828,11 +828,21 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
     }
 }
 
-fn is_transient(error: &anyhow::Error) -> bool {
-    match error.downcast_ref::<UploadRejected>() {
-        Some(rejected) => rejected.status == 429 || rejected.status >= 500,
-        // Network errors, timeouts, files changing under us
-        None => true,
+/// Worth trying again. A new upload is only retried when SmugMug can't have
+/// stored it (rate limited, or the connection never opened): after a 5xx or
+/// a timeout the image may exist, and sending it again would duplicate it.
+/// The next run finds such an image by name and MD5 and links it instead.
+/// Replacing an image's content is safe to repeat.
+fn is_transient(error: &anyhow::Error, target: UploadTarget<'_>) -> bool {
+    let repeatable = matches!(target, UploadTarget::ReplaceImage(_));
+    if let Some(rejected) = error.downcast_ref::<UploadRejected>() {
+        return rejected.status == 429 || (repeatable && rejected.status >= 500);
+    }
+    match error.downcast_ref::<reqwest::Error>() {
+        Some(e) if e.is_connect() => true,
+        Some(e) => repeatable && (e.is_timeout() || e.is_request() || e.is_body()),
+        // Reading the file failed: trying again won't help
+        None => false,
     }
 }
 
@@ -1524,6 +1534,24 @@ mod tests {
         let stats = s.run_with(options).await;
         assert_eq!(stats.scanned, 1);
         assert_eq!(stats.uploaded, 1);
+    }
+
+    #[test]
+    fn new_uploads_are_retried_only_when_nothing_can_have_been_stored() {
+        let rejected = |status| {
+            anyhow::Error::from(UploadRejected {
+                status,
+                body: String::new(),
+            })
+        };
+        let album = UploadTarget::Album("/api/v2/album/A");
+        let replace = UploadTarget::ReplaceImage("/api/v2/album/A/image/B-0");
+        assert!(is_transient(&rejected(429), album));
+        assert!(!is_transient(&rejected(500), album));
+        assert!(!is_transient(&rejected(503), album));
+        assert!(is_transient(&rejected(503), replace));
+        assert!(!is_transient(&rejected(413), replace));
+        assert!(!is_transient(&anyhow::anyhow!("file vanished"), replace));
     }
 
     #[test]

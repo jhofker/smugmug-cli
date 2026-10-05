@@ -432,7 +432,9 @@ async fn browser_sign_in(
 /// the environment/.env, else prompts. Creates the config if missing.
 pub async fn auth_command() -> Result<()> {
     let _ = dotenvy::dotenv();
-    let existing = load_config().ok();
+    // The file alone: it's saved back below, and credentials that only came
+    // from the environment mustn't end up in it.
+    let existing = load_config_file().ok();
 
     let (api_key, api_secret) = match &existing {
         Some(cfg) if !cfg.auth.api_key.is_empty() && !cfg.auth.api_secret.is_empty() => {
@@ -499,37 +501,83 @@ pub async fn auth_command() -> Result<()> {
     Ok(())
 }
 
+/// The credential variables, in `AuthConfig` field order.
+const CREDENTIAL_VARS: [&str; 4] = [
+    "SMUGMUG_API_KEY",
+    "SMUGMUG_API_SECRET",
+    "SMUGMUG_ACCESS_TOKEN",
+    "SMUGMUG_ACCESS_TOKEN_SECRET",
+];
+
+/// The config to run with: the config file with any credentials from the
+/// environment (as a container gets them) put over its own. Without a file,
+/// all four credentials must be in the environment. Never save this back:
+/// use `load_config_file` for that, so environment credentials stay out of
+/// the file.
 pub fn load_config() -> Result<Config> {
-    let config_path = get_config_path()?;
-
-    // Credentials in the environment (as a container gets them) work with
-    // or without a config file, and win over the file's.
-    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    let env_auth = (
-        env("SMUGMUG_API_KEY"),
-        env("SMUGMUG_API_SECRET"),
-        env("SMUGMUG_ACCESS_TOKEN"),
-        env("SMUGMUG_ACCESS_TOKEN_SECRET"),
-    );
-    let apply_env = |mut config: Config| {
-        if let Some(v) = env_auth.0.clone() {
-            config.auth.api_key = v;
-        }
-        if let Some(v) = env_auth.1.clone() {
-            config.auth.api_secret = v;
-        }
-        if let Some(v) = env_auth.2.clone() {
-            config.auth.access_token = v;
-        }
-        if let Some(v) = env_auth.3.clone() {
-            config.auth.access_token_secret = v;
-        }
-        config
+    let file = match load_config_file() {
+        Ok(config) => Some(config),
+        Err(e) if get_config_path()?.exists() => return Err(e),
+        Err(_) => None,
     };
+    with_env_credentials(file, |name| {
+        std::env::var(name).ok().filter(|v| !v.is_empty())
+    })
+}
 
-    if !config_path.exists() && env_auth.0.is_some() && env_auth.2.is_some() {
-        return Ok(apply_env(Config::default()));
+/// `config` (the file's, if there is one) with credentials from `env` put
+/// over its own.
+fn with_env_credentials(
+    config: Option<Config>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<Config> {
+    let values: Vec<Option<String>> = CREDENTIAL_VARS.iter().map(|name| env(name)).collect();
+    let mut config = match config {
+        Some(config) => config,
+        None if values.iter().all(Option::is_none) => {
+            anyhow::bail!(
+                "Config file not found at: {}\n\n\
+                 Run 'smugmug-cli init' to create your configuration, or set {}.\n\
+                 (Tip: You can create a .env file with your credentials, and init will use them as defaults)",
+                get_config_path()?.display(),
+                CREDENTIAL_VARS.join(", ")
+            );
+        }
+        None => {
+            let missing: Vec<&str> = CREDENTIAL_VARS
+                .iter()
+                .zip(&values)
+                .filter(|(_, v)| v.is_none())
+                .map(|(name, _)| *name)
+                .collect();
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "No config file, and these credentials aren't set: {}",
+                    missing.join(", ")
+                );
+            }
+            Config::default()
+        }
+    };
+    let [key, secret, token, token_secret] = <[Option<String>; 4]>::try_from(values).unwrap();
+    let auth = &mut config.auth;
+    for (field, value) in [
+        (&mut auth.api_key, key),
+        (&mut auth.api_secret, secret),
+        (&mut auth.access_token, token),
+        (&mut auth.access_token_secret, token_secret),
+    ] {
+        if let Some(value) = value {
+            *field = value;
+        }
     }
+    Ok(config)
+}
+
+/// The config file exactly as written (no environment overrides), for
+/// changing and saving back.
+pub fn load_config_file() -> Result<Config> {
+    let config_path = get_config_path()?;
 
     if !config_path.exists() {
         anyhow::bail!(
@@ -542,9 +590,7 @@ pub fn load_config() -> Result<Config> {
 
     let contents = fs::read_to_string(&config_path).context("Failed to read config file")?;
 
-    let config: Config = toml::from_str(&contents).context("Failed to parse config file")?;
-
-    Ok(apply_env(config))
+    toml::from_str(&contents).context("Failed to parse config file")
 }
 
 pub fn save_config(config: &Config) -> Result<()> {
@@ -600,6 +646,66 @@ mod tests {
             },
             backup: BackupConfig::default(),
         }
+    }
+
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn environment_credentials_override_the_file() {
+        let config = with_env_credentials(
+            Some(create_test_config()),
+            env_of(&[("SMUGMUG_ACCESS_TOKEN", "env-token")]),
+        )
+        .unwrap();
+        assert_eq!(config.auth.access_token, "env-token");
+        assert_eq!(config.auth.api_key, create_test_config().auth.api_key);
+    }
+
+    #[test]
+    fn without_a_file_all_four_credentials_are_needed() {
+        let err = with_env_credentials(
+            None,
+            env_of(&[("SMUGMUG_API_KEY", "k"), ("SMUGMUG_ACCESS_TOKEN", "t")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("SMUGMUG_API_SECRET"), "{}", err);
+        assert!(err.contains("SMUGMUG_ACCESS_TOKEN_SECRET"), "{}", err);
+        assert!(!err.contains("SMUGMUG_API_KEY,"), "{}", err);
+
+        let config = with_env_credentials(
+            None,
+            env_of(&[
+                ("SMUGMUG_API_KEY", "k"),
+                ("SMUGMUG_API_SECRET", "s"),
+                ("SMUGMUG_ACCESS_TOKEN", "t"),
+                ("SMUGMUG_ACCESS_TOKEN_SECRET", "ts"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                config.auth.api_key.as_str(),
+                config.auth.api_secret.as_str(),
+                config.auth.access_token.as_str(),
+                config.auth.access_token_secret.as_str()
+            ),
+            ("k", "s", "t", "ts")
+        );
+    }
+
+    #[test]
+    fn without_a_file_or_credentials_it_says_how_to_set_up() {
+        let err = with_env_credentials(None, env_of(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("smugmug-cli init"), "{}", err);
     }
 
     #[test]

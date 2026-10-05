@@ -16,6 +16,14 @@ pub struct NodeTree {
     pub children: Vec<NodeTree>,
 }
 
+/// Time allowed to connect to SmugMug.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Time a connection may go without any data before the request fails, so
+/// a stalled connection can't hang an unattended backup. There's no limit
+/// on a whole request: a big video may take a long time to upload.
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Tries per API request (see `send_retrying`).
 const MAX_ATTEMPTS: u32 = 5;
 
@@ -70,7 +78,11 @@ impl SmugMugClient {
         access_token_secret: String,
     ) -> Self {
         SmugMugClient {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
             api_key,
             api_secret,
             access_token,
