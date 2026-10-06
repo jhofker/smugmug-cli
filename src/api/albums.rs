@@ -329,9 +329,31 @@ impl SmugMugClient {
 
     /// Create a folder named `name` in the folder node `parent_node_uri` and
     /// return its node URI. `privacy` (Public, Unlisted or Private) is set if
-    /// given. With `sort_by_name`, its contents are listed by name, ascending
-    /// (SmugMug's default for a new folder is by date modified, newest first).
+    /// given. SmugMug lists a new folder's contents by date modified, newest
+    /// first; see `create_sorted_folder` for by name.
     pub async fn create_folder(
+        &self,
+        parent_node_uri: &str,
+        name: &str,
+        privacy: Option<&str>,
+    ) -> Result<String> {
+        self.create_folder_node(parent_node_uri, name, privacy, false)
+            .await
+    }
+
+    /// Like `create_folder`, but the new folder lists its contents by name,
+    /// ascending.
+    pub async fn create_sorted_folder(
+        &self,
+        parent_node_uri: &str,
+        name: &str,
+        privacy: Option<&str>,
+    ) -> Result<String> {
+        self.create_folder_node(parent_node_uri, name, privacy, true)
+            .await
+    }
+
+    async fn create_folder_node(
         &self,
         parent_node_uri: &str,
         name: &str,
@@ -848,7 +870,7 @@ impl SmugMugClient {
         }
 
         // Folder doesn't exist, create it
-        self.create_folder(parent_node_uri, folder_name, privacy, sort_by_name)
+        self.create_folder_node(parent_node_uri, folder_name, privacy, sort_by_name)
             .await
             .map(Some)
     }

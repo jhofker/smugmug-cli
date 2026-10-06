@@ -41,7 +41,7 @@ impl Smug for SmugMugClient {
         self.list_children(node_uri).await
     }
     async fn create_folder(&self, parent_node_uri: &str, name: &str) -> Result<String> {
-        SmugMugClient::create_folder(self, parent_node_uri, name, Some("Private"), true).await
+        SmugMugClient::create_sorted_folder(self, parent_node_uri, name, Some("Private")).await
     }
     async fn create_album(&self, parent_node_uri: &str, name: &str) -> Result<Album> {
         SmugMugClient::create_album(self, name, Some(parent_node_uri), "Private").await
