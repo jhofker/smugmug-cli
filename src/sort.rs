@@ -228,7 +228,10 @@ fn album_item(node: &ChildNode, path: String) -> Option<Item> {
 }
 
 /// The folders and albums to change, per `options`.
-async fn collect<B: SortBackend>(backend: &B, options: &SortOptions) -> Result<Vec<Item>> {
+async fn collect<B: SortBackend>(
+    backend: &B,
+    options: &SortOptions,
+) -> Result<(Vec<Item>, Vec<String>)> {
     let (target, shown) = find(backend, &options.path).await?;
     let is_folder = target.node_type == "Folder";
 
@@ -246,6 +249,7 @@ async fn collect<B: SortBackend>(backend: &B, options: &SortOptions) -> Result<V
     }
 
     let mut items = Vec::new();
+    let mut failed = Vec::new();
     if is_folder {
         if options.folders.is_some() {
             items.push(folder_item(&target, shown.clone()));
@@ -253,7 +257,16 @@ async fn collect<B: SortBackend>(backend: &B, options: &SortOptions) -> Result<V
         if options.recursive {
             let mut pending = vec![(target.uri.clone(), shown)];
             while let Some((uri, path)) = pending.pop() {
-                for child in backend.children(&uri).await? {
+                // A folder that can't be listed is reported, and the rest
+                // of the tree is still done.
+                let children = match backend.children(&uri).await {
+                    Ok(children) => children,
+                    Err(e) => {
+                        failed.push(format!("{}: couldn't list what's in it: {:#}", path, e));
+                        continue;
+                    }
+                };
+                for child in children {
                     let child_path = format!("{}/{}", path, child.name);
                     match child.node_type.as_str() {
                         "Folder" => {
@@ -273,7 +286,7 @@ async fn collect<B: SortBackend>(backend: &B, options: &SortOptions) -> Result<V
     } else if let Some(item) = album_item(&target, shown) {
         items.push(item);
     }
-    Ok(items)
+    Ok((items, failed))
 }
 
 enum Outcome {
@@ -334,9 +347,12 @@ pub async fn run<B: SortBackend>(backend: &B, options: &SortOptions) -> Result<S
     if options.folders.is_none() && options.albums.is_none() {
         bail!("Say what to sort: --folders-by and/or --albums-by");
     }
-    let items = collect(backend, options).await?;
+    let (items, listing_failures) = collect(backend, options).await?;
     let total = items.len();
-    let mut summary = SortSummary::default();
+    let mut summary = SortSummary {
+        failed: listing_failures,
+        ..SortSummary::default()
+    };
     let mut done = 0;
 
     let mut results = stream::iter(items)
@@ -436,6 +452,8 @@ mod tests {
         albums: Mutex<HashMap<String, (String, String)>>,
         /// Node URIs and album keys whose update fails.
         fail: Mutex<Vec<String>>,
+        /// Folders whose listing fails.
+        fail_listing: Mutex<Vec<String>>,
         sets: Mutex<Vec<String>>,
         next: Mutex<u32>,
     }
@@ -541,6 +559,15 @@ mod tests {
             Ok("/node/root".into())
         }
         async fn children(&self, node_uri: &str) -> Result<Vec<ChildNode>> {
+            if self
+                .fail_listing
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f == node_uri)
+            {
+                bail!("503");
+            }
             Ok(self.children.lock().unwrap()[node_uri].clone())
         }
         async fn album_sort(&self, key: &str) -> Result<(String, String)> {
@@ -775,6 +802,37 @@ mod tests {
         let mut o = options(path);
         o.folders = Some(FolderSort::Name);
         o
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_cant_be_listed_is_reported_and_the_rest_still_done() {
+        let (fake, t) = account();
+        fake.fail_listing.lock().unwrap().push(t.y2014.clone());
+        let mut o = options("Backup");
+        o.folders = Some(FolderSort::Name);
+        o.recursive = true;
+        let summary = run(&fake, &o).await.unwrap();
+
+        // 2014 itself and 2015 changed; what's inside 2014 couldn't be reached
+        assert_eq!(summary.folders_changed, 2);
+        assert_eq!(
+            fake.folder_sort(&t.y2014),
+            ("Name".into(), "Ascending".into())
+        );
+        assert_eq!(
+            fake.folder_sort(&t.y2015),
+            ("Name".into(), "Ascending".into())
+        );
+        assert_eq!(
+            fake.folder_sort(&t.m07),
+            (DEFAULT.0.into(), DEFAULT.1.into())
+        );
+        assert_eq!(summary.failed.len(), 1);
+        assert!(
+            summary.failed[0].starts_with("Backup/2014: couldn't list"),
+            "{:?}",
+            summary.failed
+        );
     }
 
     #[tokio::test]
