@@ -102,6 +102,12 @@ pub struct ChildNode {
     pub web_uri: Option<String>,
     #[serde(rename = "Uris", default)]
     pub uris: Option<ChildNodeUris>,
+    /// How a folder lists its contents (`Name`, `DateAdded`, `DateModified`,
+    /// `SortIndex`). Not what an album's photos are sorted by.
+    #[serde(rename = "SortMethod", default)]
+    pub sort_method: Option<String>,
+    #[serde(rename = "SortDirection", default)]
+    pub sort_direction: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -325,6 +331,69 @@ impl SmugMugClient {
             "Node",
         )
         .await
+    }
+
+    /// Set how the folder at `node_uri` lists its contents (`method` is
+    /// `Name`, `DateAdded`, `DateModified` or `SortIndex`; `direction`
+    /// `Ascending` or `Descending`).
+    pub async fn set_folder_sort(
+        &self,
+        node_uri: &str,
+        method: &str,
+        direction: &str,
+    ) -> Result<()> {
+        let url = format!("https://api.smugmug.com{}", node_uri);
+        let body = serde_json::json!({"SortMethod": method, "SortDirection": direction});
+        let response = self.patch_with_auth(&url, body).await?;
+        let status = response.status();
+        let body_text = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Failed to set the folder's sort order: {} - {}",
+                status,
+                body_text
+            );
+        }
+        Ok(())
+    }
+
+    /// How an album sorts its photos now: (method, direction), as SmugMug
+    /// names them (e.g. "Date Taken", "Ascending").
+    pub async fn get_album_sort(&self, album_key: &str) -> Result<(String, String)> {
+        #[derive(Deserialize)]
+        struct R {
+            #[serde(rename = "Response")]
+            response: RData,
+        }
+        #[derive(Deserialize)]
+        struct RData {
+            #[serde(rename = "Album")]
+            album: Sorted,
+        }
+        #[derive(Deserialize)]
+        struct Sorted {
+            #[serde(rename = "SortMethod", default)]
+            method: String,
+            #[serde(rename = "SortDirection", default)]
+            direction: String,
+        }
+        let url = format!("https://api.smugmug.com/api/v2/album/{}", album_key);
+        let response = self.get_with_auth(&url).await?;
+        let status = response.status();
+        let body_text = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Failed to read album {}: {} - {}",
+                album_key,
+                status,
+                body_text
+            );
+        }
+        let parsed: R = serde_json::from_str(&body_text)?;
+        Ok((
+            parsed.response.album.method,
+            parsed.response.album.direction,
+        ))
     }
 
     /// Create a folder named `name` in the folder node `parent_node_uri` and

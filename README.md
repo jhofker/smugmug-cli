@@ -264,7 +264,7 @@ Used by `upload` without `--album` and by `backup`:
   folders and day albums are created only when a file needs them, all private. The folders it
   creates list their contents by name, ascending, so years, months and days read in order
   (SmugMug's own default is newest-modified first). Folders that already exist keep their sort
-  order.
+  order; `smugmug-cli sort Backup --folders-by name --recursive` fixes them (see Sort below).
 - **Duplicates** (the same content at several paths, e.g. a backup copy of a folder) are
   uploaded once; the other copies are linked to that image. A file already on SmugMug in
   another album (uploaded with `--album`, say) is added to its day album rather than
@@ -305,6 +305,27 @@ it takes a while; later runs only `stat` files. Start with `--dry-run` to check 
 and how files will be dated. On Unraid, the *Dynamix Cache Directories* plugin keeps
 directory listings in memory so the periodic `stat` walk doesn't spin up array disks, and
 the cache directory belongs on the SSD pool (e.g. `/mnt/user/appdata/smugmug-cli`).
+
+### Sort
+
+- `smugmug-cli sort <PATH>` - Set how a folder lists its contents or an album lists its photos
+  - `--folders-by <HOW>` - How folders list their contents: `name`, `date-added`, `date-modified` or `manual`
+  - `--albums-by <HOW>` - How albums list their photos: `date-taken`, `date-uploaded`, `date-modified`, `filename`, `caption` or `manual`
+  - `--direction <asc|desc>` - Default `asc`
+  - `--recursive` - Everything under PATH too
+  - `--dry-run` - Show what would change without changing it
+
+PATH is a folder or album named from the top of your account, like `Backup`, `Backup/2014/07` or
+`Backup/2014/07/2014-07-12`. Folders and albums are sorted by different settings, so say which
+you mean: a run only touches the kind you name, and `--recursive --folders-by name` never changes
+an album. Anything already set the way you asked is left alone, so a run can be repeated safely.
+SmugMug's default for a new folder is date modified, newest first, which is what folders made by
+versions before 0.5.1 have:
+
+```sh
+smugmug-cli sort Backup --folders-by name --recursive --dry-run   # look first
+smugmug-cli sort Backup --folders-by name --recursive
+```
 
 ### Albums
 

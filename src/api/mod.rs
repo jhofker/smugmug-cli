@@ -373,25 +373,21 @@ impl SmugMugClient {
         Ok(self.client.delete(url).headers(headers).send().await?)
     }
 
+    /// PATCH, retried like a GET: setting fields to values is safe to repeat.
     pub async fn patch_with_auth(
         &self,
         url: &str,
         body: serde_json::Value,
     ) -> Result<reqwest::Response> {
-        let oauth_header = self.build_oauth_header("PATCH", url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-        headers.insert("Content-Type", HeaderValue::from_static("application/json"));
-
-        Ok(self
-            .client
-            .patch(url)
-            .headers(headers)
-            .json(&body)
-            .send()
-            .await?)
+        self.send_retrying(true, || {
+            let oauth_header = self.build_oauth_header("PATCH", url);
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
+            headers.insert("Accept", HeaderValue::from_static("application/json"));
+            headers.insert("Content-Type", HeaderValue::from_static("application/json"));
+            Ok(self.client.patch(url).headers(headers).json(&body))
+        })
+        .await
     }
 }
 
