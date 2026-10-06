@@ -453,6 +453,8 @@ pub(crate) mod tests {
                     url_name: String::new(),
                     web_uri: None,
                     uris: None,
+                    sort_method: None,
+                    sort_direction: None,
                 });
             self.nodes.lock().unwrap().insert(uri.clone(), Vec::new());
             uri
@@ -479,6 +481,8 @@ pub(crate) mod tests {
                             uri: album_uri.clone(),
                         }),
                     }),
+                    sort_method: None,
+                    sort_direction: None,
                 });
             let images = images
                 .iter()

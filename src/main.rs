@@ -128,6 +128,7 @@ mod dated;
 mod downloader;
 mod raw;
 mod scanner;
+mod sort;
 mod uploader;
 
 #[derive(Parser)]
@@ -223,6 +224,40 @@ enum Commands {
         /// their embedded previews, or nothing. Default: auto
         #[arg(long, value_enum)]
         raw: Option<config::RawMode>,
+    },
+
+    /// Set how a folder lists its contents or an album lists its photos,
+    /// optionally for everything under it. Folders and albums are sorted
+    /// by different settings: give --folders-by, --albums-by, or both. A
+    /// repeat run only changes what's no longer right.
+    Sort {
+        /// Folder or album, as a path of names from the top of your account
+        /// (e.g. Backup, Backup/2014/07, Backup/2014/07/2014-07-12)
+        path: String,
+
+        /// How folders list their contents (name, date-added, date-modified,
+        /// manual). SmugMug's default for a new folder is date-modified,
+        /// newest first
+        #[arg(long, value_enum)]
+        folders_by: Option<sort::FolderSort>,
+
+        /// How albums list their photos (manual, caption, filename,
+        /// date-uploaded, date-modified, date-taken)
+        #[arg(long, value_enum)]
+        albums_by: Option<sort::AlbumSort>,
+
+        /// Ascending or descending
+        #[arg(short, long, value_enum, default_value = "asc")]
+        direction: sort::Direction,
+
+        /// Also set every folder (with --folders-by) and album (with
+        /// --albums-by) under the path
+        #[arg(short, long)]
+        recursive: bool,
+
+        /// Show what would change without changing it
+        #[arg(short = 'n', long)]
+        dry_run: bool,
     },
 
     /// Back up directories into albums by the day photos were taken
@@ -1633,6 +1668,35 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+            }
+        }
+        Commands::Sort {
+            path,
+            folders_by,
+            albums_by,
+            direction,
+            recursive,
+            dry_run,
+        } => {
+            let cfg = config::load_config()?;
+            let client = api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            );
+            let options = sort::SortOptions {
+                path,
+                folders: folders_by,
+                albums: albums_by,
+                direction,
+                recursive,
+                dry_run,
+            };
+            let summary = sort::run(&client, &options).await?;
+            sort::print_summary(&summary, &options);
+            if !summary.failed.is_empty() {
+                anyhow::bail!("{} could not be updated", summary.failed.len());
             }
         }
         Commands::Backup {

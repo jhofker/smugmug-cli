@@ -71,6 +71,7 @@ smugmug-cli <command>
   - `plan.rs`: year/month folders and day album series (`AlbumSeries` per day), created lazily and listed once per run (folders the dated paths create get `SortMethod=Name`, `SortDirection=Ascending` via `create_folder(.., sort_by_name)`; SmugMug's default is DateModified, Descending; existing folders are left alone); per-day file-name map for same-name/different-content renames (`stem~md5[..8].ext`); `Smug` trait with an in-memory fake for tests
   - `run.rs`: the pipeline (see below); `Uploads` trait so tests run against the fake
 - **src/backup.rs**: `backup` command: interval loop, `last_run.json`
+- **src/sort.rs**: `sort` command: a folder's child order (node `SortMethod`: Name/DateAdded/DateModified/SortIndex) and an album's photo order (album `SortMethod`: Position/Caption/Filename/Date Uploaded/Date Modified/Date Taken, spelled with spaces) are different settings, given as `--folders-by`/`--albums-by` so `--recursive` only touches the kind asked for; skips nodes already right; `SortBackend` trait with an in-memory fake for tests
 - **src/downloader/**: Album download functionality
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
   - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB

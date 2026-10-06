@@ -6,4 +6,5 @@ pub mod dated;
 pub mod downloader;
 pub mod raw;
 pub mod scanner;
+pub mod sort;
 pub mod uploader;
