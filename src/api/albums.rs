@@ -43,6 +43,22 @@ pub(super) fn split_next_page(next_page: &str) -> Option<NextPage> {
     ))
 }
 
+/// The request body that creates a folder.
+fn folder_body(name: &str, privacy: Option<&str>, sort_by_name: bool) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "Type": "Folder",
+        "Name": name,
+    });
+    if let Some(privacy) = privacy {
+        body["Privacy"] = serde_json::json!(privacy);
+    }
+    if sort_by_name {
+        body["SortMethod"] = serde_json::json!("Name");
+        body["SortDirection"] = serde_json::json!("Ascending");
+    }
+    body
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Album {
     #[serde(rename = "AlbumKey")]
@@ -313,21 +329,17 @@ impl SmugMugClient {
 
     /// Create a folder named `name` in the folder node `parent_node_uri` and
     /// return its node URI. `privacy` (Public, Unlisted or Private) is set if
-    /// given.
+    /// given. With `sort_by_name`, its contents are listed by name, ascending
+    /// (SmugMug's default for a new folder is by date modified, newest first).
     pub async fn create_folder(
         &self,
         parent_node_uri: &str,
         name: &str,
         privacy: Option<&str>,
+        sort_by_name: bool,
     ) -> Result<String> {
         let create_url = format!("https://api.smugmug.com{}!children", parent_node_uri);
-        let mut body = serde_json::json!({
-            "Type": "Folder",
-            "Name": name,
-        });
-        if let Some(privacy) = privacy {
-            body["Privacy"] = serde_json::json!(privacy);
-        }
+        let body = folder_body(name, privacy, sort_by_name);
         let response = self.post_with_auth(&create_url, body).await?;
         let status = response.status();
         let body_text = response.text().await?;
@@ -689,7 +701,19 @@ impl SmugMugClient {
         folder_path: &str,
         privacy: Option<&str>,
     ) -> Result<String> {
-        self.walk_folder_path(folder_path, privacy, true)
+        self.walk_folder_path(folder_path, privacy, true, false)
+            .await?
+            .context("Folder path could not be created")
+    }
+
+    /// Like `find_or_create_folder_path`, but folders it creates list their
+    /// contents by name, ascending.
+    pub async fn find_or_create_sorted_folder_path(
+        &self,
+        folder_path: &str,
+        privacy: Option<&str>,
+    ) -> Result<String> {
+        self.walk_folder_path(folder_path, privacy, true, true)
             .await?
             .context("Folder path could not be created")
     }
@@ -697,7 +721,7 @@ impl SmugMugClient {
     /// Node URI of the folder at `folder_path`, or `None` if any folder along
     /// it doesn't exist. Creates nothing.
     pub async fn find_folder_path(&self, folder_path: &str) -> Result<Option<String>> {
-        self.walk_folder_path(folder_path, None, false).await
+        self.walk_folder_path(folder_path, None, false, false).await
     }
 
     async fn walk_folder_path(
@@ -705,6 +729,7 @@ impl SmugMugClient {
         folder_path: &str,
         privacy: Option<&str>,
         create_missing: bool,
+        sort_by_name: bool,
     ) -> Result<Option<String>> {
         let mut current_node_uri = self.auth_user().await?.root_node_uri;
 
@@ -719,6 +744,7 @@ impl SmugMugClient {
                     folder_name,
                     privacy,
                     create_missing,
+                    sort_by_name,
                 )
                 .await?
             {
@@ -736,6 +762,7 @@ impl SmugMugClient {
         folder_name: &str,
         privacy: Option<&str>,
         create_missing: bool,
+        sort_by_name: bool,
     ) -> Result<Option<String>> {
         #[derive(serde::Deserialize)]
         struct ChildNodesResponse {
@@ -821,7 +848,7 @@ impl SmugMugClient {
         }
 
         // Folder doesn't exist, create it
-        self.create_folder(parent_node_uri, folder_name, privacy)
+        self.create_folder(parent_node_uri, folder_name, privacy, sort_by_name)
             .await
             .map(Some)
     }
@@ -1858,5 +1885,24 @@ mod tests {
 
         // In a properly architected version, we'd inject the server URL and test the actual call
         // The actual call would fail with anyhow::Error containing "Failed to update album settings: 403"
+    }
+
+    #[test]
+    fn folder_body_sorts_by_name_only_when_asked() {
+        let plain = folder_body("2014", Some("Private"), false);
+        assert_eq!(
+            plain,
+            serde_json::json!({"Type": "Folder", "Name": "2014", "Privacy": "Private"})
+        );
+        let sorted = folder_body("2014", None, true);
+        assert_eq!(
+            sorted,
+            serde_json::json!({
+                "Type": "Folder",
+                "Name": "2014",
+                "SortMethod": "Name",
+                "SortDirection": "Ascending"
+            })
+        );
     }
 }
