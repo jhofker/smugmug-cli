@@ -261,7 +261,10 @@ Used by `upload` without `--album` and by `backup`:
   `IMG_1234.MOV`) goes into the photo's day album. Set `live_photo_videos = "skip"` to leave
   them out.
 - **Days with more than 5,000 files** continue in `2014-07-12 (2)` and so on. Year and month
-  folders and day albums are created only when a file needs them, all private.
+  folders and day albums are created only when a file needs them, all private. The folders it
+  creates list their contents by name, ascending, so years, months and days read in order
+  (SmugMug's own default is newest-modified first). Folders that already exist keep their sort
+  order.
 - **Duplicates** (the same content at several paths, e.g. a backup copy of a folder) are
   uploaded once; the other copies are linked to that image. A file already on SmugMug in
   another album (uploaded with `--album`, say) is added to its day album rather than

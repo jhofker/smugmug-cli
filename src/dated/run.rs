@@ -205,7 +205,7 @@ impl Uploads for SmugMugClient {
         privacy: Option<&str>,
     ) -> Result<Option<String>> {
         if create {
-            self.find_or_create_folder_path(path, privacy)
+            self.find_or_create_sorted_folder_path(path, privacy)
                 .await
                 .map(Some)
         } else {

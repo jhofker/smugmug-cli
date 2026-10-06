@@ -68,7 +68,7 @@ smugmug-cli <command>
   - `scan.rs`: walks with the `ignore` crate (exclude globs as overrides, `.smugmugignore`, hidden files, NAS dirs pruned), stat only; pairs Live Photo videos with their photo and drops RAWs with a JPEG sibling (`select_raw_files`)
   - `index.rs`: sled tree `files` (path → size, mtime, SHA-256, uploaded MD5, date, image URI) and `refs` (image URI → paths using it), in the hash store's database
   - `date.rs`: EXIF original date (kamadak-exif; RAWs via `raw::exif`), QuickTime `com.apple.quicktime.creationdate`/`mvhd`, file-name dates, EXIF `DateTime`, mtime
-  - `plan.rs`: year/month folders and day album series (`AlbumSeries` per day), created lazily and listed once per run; per-day file-name map for same-name/different-content renames (`stem~md5[..8].ext`); `Smug` trait with an in-memory fake for tests
+  - `plan.rs`: year/month folders and day album series (`AlbumSeries` per day), created lazily and listed once per run (folders the dated paths create get `SortMethod=Name`, `SortDirection=Ascending` via `create_folder(.., sort_by_name)`; SmugMug's default is DateModified, Descending; existing folders are left alone); per-day file-name map for same-name/different-content renames (`stem~md5[..8].ext`); `Smug` trait with an in-memory fake for tests
   - `run.rs`: the pipeline (see below); `Uploads` trait so tests run against the fake
 - **src/backup.rs**: `backup` command: interval loop, `last_run.json`
 - **src/downloader/**: Album download functionality

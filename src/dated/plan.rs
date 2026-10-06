@@ -27,7 +27,8 @@ use crate::uploader::album_series::{AlbumSeries, AlbumSeriesBackend, MAX_ALBUM_I
 #[allow(async_fn_in_trait)]
 pub trait Smug {
     async fn children(&self, node_uri: &str) -> Result<Vec<ChildNode>>;
-    /// Create a private folder; returns its node URI.
+    /// Create a private folder listed by name, ascending; returns its node
+    /// URI.
     async fn create_folder(&self, parent_node_uri: &str, name: &str) -> Result<String>;
     /// Create a private album.
     async fn create_album(&self, parent_node_uri: &str, name: &str) -> Result<Album>;
@@ -40,7 +41,7 @@ impl Smug for SmugMugClient {
         self.list_children(node_uri).await
     }
     async fn create_folder(&self, parent_node_uri: &str, name: &str) -> Result<String> {
-        SmugMugClient::create_folder(self, parent_node_uri, name, Some("Private")).await
+        SmugMugClient::create_sorted_folder(self, parent_node_uri, name, Some("Private")).await
     }
     async fn create_album(&self, parent_node_uri: &str, name: &str) -> Result<Album> {
         SmugMugClient::create_album(self, name, Some(parent_node_uri), "Private").await
