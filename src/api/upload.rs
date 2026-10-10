@@ -1,9 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use base64::{Engine as _, engine::general_purpose};
+use bytes::Bytes;
+use futures_util::{Stream, StreamExt};
 use md5::Context;
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::task::Poll;
+use std::time::{Duration, Instant};
 use tokio::fs;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -16,8 +21,11 @@ pub struct UploadResult {
 #[derive(Debug, Deserialize)]
 struct UploadResponse {
     stat: String,
+    /// Missing when SmugMug refuses the file ("stat": "fail").
     #[serde(rename = "Image")]
-    image: ImageInfo,
+    image: Option<ImageInfo>,
+    message: Option<String>,
+    code: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,14 +212,20 @@ async fn send_upload(
         &payload.mime_type,
         &payload.file_name,
     )?;
-    let response = client
-        .http()
-        .post(UPLOAD_URL)
-        .headers(headers)
-        .body(payload.data.clone())
-        .send()
-        .await?;
-    read_upload_response(response).await
+    let data = payload.data.clone();
+    let chunks = futures_util::stream::iter(
+        (0..data.len())
+            .step_by(UPLOAD_CHUNK)
+            .map(move |start| Ok(data.slice(start..(start + UPLOAD_CHUNK).min(data.len())))),
+    );
+    post_upload(
+        client.upload_http(),
+        UPLOAD_URL,
+        headers,
+        chunks,
+        UploadLimits::default(),
+    )
+    .await
 }
 
 /// SmugMug's upload endpoint.
@@ -261,18 +275,125 @@ pub async fn upload_file(
         file.file_name,
     )?;
     let reader = fs::File::open(file.path).await?;
-    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(
-        reader,
-        256 * 1024,
-    ));
-    let response = client
-        .http()
-        .post(UPLOAD_URL)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await?;
-    read_upload_response(response).await
+    let chunks = tokio_util::io::ReaderStream::with_capacity(reader, UPLOAD_CHUNK);
+    post_upload(
+        client.upload_http(),
+        UPLOAD_URL,
+        headers,
+        chunks,
+        UploadLimits::default(),
+    )
+    .await
+}
+
+/// Size of the pieces an upload's body is sent in.
+const UPLOAD_CHUNK: usize = 256 * 1024;
+
+/// How long an upload may take, by stage. There's no limit on the whole
+/// upload, since a big video on a slow connection can take hours; instead
+/// it fails when it stops making progress.
+#[derive(Debug, Clone, Copy)]
+pub struct UploadLimits {
+    /// The connection took no more of the file for this long.
+    pub stalled: Duration,
+    /// SmugMug hasn't answered this long after receiving the whole file
+    /// (it processes videos before it replies).
+    pub response: Duration,
+    /// How often to check the two above.
+    pub check_every: Duration,
+}
+
+impl Default for UploadLimits {
+    fn default() -> Self {
+        UploadLimits {
+            stalled: Duration::from_secs(5 * 60),
+            response: Duration::from_secs(30 * 60),
+            check_every: Duration::from_secs(10),
+        }
+    }
+}
+
+/// An upload stopped making progress (see `UploadLimits`).
+#[derive(Debug, thiserror::Error)]
+pub enum UploadTimedOut {
+    #[error("upload stalled: no data sent for {}", describe_duration(*.0))]
+    Stalled(Duration),
+    #[error(
+        "SmugMug didn't answer within {} of receiving the whole file",
+        describe_duration(*.0)
+    )]
+    NoResponse(Duration),
+}
+
+fn describe_duration(d: Duration) -> String {
+    match d.as_secs() {
+        s if s >= 60 && s % 60 == 0 => format!("{} minutes", s / 60),
+        s if s >= 1 => format!("{} seconds", s),
+        _ => format!("{} ms", d.as_millis()),
+    }
+}
+
+/// When an upload last sent data, and when it finished sending.
+struct Progress {
+    last_sent: Instant,
+    finished: Option<Instant>,
+}
+
+/// POST an upload, failing it if it stops making progress. The body is
+/// watched rather than the connection's reads: during an upload nothing is
+/// received, so a read timeout would cut off every upload that takes
+/// longer than it.
+async fn post_upload<S>(
+    http: &reqwest::Client,
+    url: &str,
+    headers: HeaderMap,
+    chunks: S,
+    limits: UploadLimits,
+) -> Result<UploadResult>
+where
+    S: Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
+{
+    let progress = Arc::new(Mutex::new(Progress {
+        last_sent: Instant::now(),
+        finished: None,
+    }));
+    let sent = progress.clone();
+    let done = progress.clone();
+    let body = chunks
+        .inspect(move |_| sent.lock().unwrap().last_sent = Instant::now())
+        .chain(futures_util::stream::poll_fn(move |_| {
+            done.lock().unwrap().finished = Some(Instant::now());
+            Poll::Ready(None)
+        }));
+
+    let request = async {
+        let response = http
+            .post(url)
+            .headers(headers)
+            .body(reqwest::Body::wrap_stream(body))
+            .send()
+            .await?;
+        read_upload_response(response).await
+    };
+    tokio::pin!(request);
+
+    loop {
+        tokio::select! {
+            result = &mut request => return result,
+            _ = tokio::time::sleep(limits.check_every) => {
+                let progress = progress.lock().unwrap();
+                match progress.finished {
+                    None if progress.last_sent.elapsed() > limits.stalled => {
+                        return Err(UploadTimedOut::Stalled(limits.stalled).into());
+                    }
+                    Some(at) if at.elapsed() > limits.response => {
+                        return Err(UploadTimedOut::NoResponse(limits.response).into());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 /// Upload bytes held in memory (a JPEG rendered from a RAW file).
@@ -348,15 +469,45 @@ async fn read_upload_response(response: reqwest::Response) -> Result<UploadResul
         .into());
     }
 
-    let upload_response: UploadResponse = serde_json::from_str(&body_text)?;
+    parse_upload_response(status_code, &body_text)
+}
 
-    if upload_response.stat != "ok" {
-        anyhow::bail!("Upload failed: {}", body_text);
+/// SmugMug answered an upload with `"stat": "fail"` (HTTP 200).
+#[derive(Debug, thiserror::Error)]
+#[error("SmugMug refused the upload: {}", self.describe())]
+pub struct UploadFailed {
+    pub code: Option<i64>,
+    pub message: Option<String>,
+    pub body: String,
+}
+
+impl UploadFailed {
+    fn describe(&self) -> String {
+        match (&self.message, self.code) {
+            (Some(message), Some(code)) => format!("{} (code {})", message, code),
+            (Some(message), None) => message.clone(),
+            _ => self.body.clone(),
+        }
     }
+}
+
+fn parse_upload_response(status_code: u16, body_text: &str) -> Result<UploadResult> {
+    let reply: UploadResponse = serde_json::from_str(body_text)
+        .with_context(|| format!("Unexpected reply from SmugMug: {}", body_text))?;
+    let image = match reply.image {
+        Some(image) if reply.stat == "ok" => image,
+        _ => {
+            return Err(UploadFailed {
+                code: reply.code,
+                message: reply.message,
+                body: body_text.to_string(),
+            }
+            .into());
+        }
+    };
 
     // Extract image key from URI (format: /api/v2/album/<key>/image/<key>-0)
-    let image_key = upload_response
-        .image
+    let image_key = image
         .image_uri
         .split('/')
         .next_back()
@@ -365,7 +516,7 @@ async fn read_upload_response(response: reqwest::Response) -> Result<UploadResul
 
     Ok(UploadResult {
         image_key,
-        image_uri: upload_response.image.image_uri,
+        image_uri: image.image_uri,
         status_code,
     })
 }
@@ -517,7 +668,7 @@ mod tests {
         let response: UploadResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.stat, "ok");
         assert_eq!(
-            response.image.image_uri,
+            response.image.unwrap().image_uri,
             "/api/v2/album/ABC123/image/IMG123-0"
         );
     }
@@ -569,18 +720,195 @@ mod tests {
         assert_eq!(mime_unknown.to_string(), "application/octet-stream");
     }
 
-    #[tokio::test]
-    async fn test_upload_response_stat_not_ok() {
-        let json = r#"{
-            "stat": "fail",
-            "message": "Upload failed",
-            "code": 1
-        }"#;
+    #[test]
+    fn test_upload_response_stat_fail_reports_smugmugs_message() {
+        let json = r#"{"stat":"fail","method":"smugmug.images.upload","code":64,"message":"Invalid file type"}"#;
+        let err = parse_upload_response(200, json).unwrap_err();
+        let failed = err.downcast_ref::<UploadFailed>().unwrap();
+        assert_eq!(failed.code, Some(64));
+        assert_eq!(
+            err.to_string(),
+            "SmugMug refused the upload: Invalid file type (code 64)"
+        );
 
-        // If we were to try to parse this as UploadResponse, it would fail
-        // because the Image field is missing. This tests that error handling works.
-        let result = serde_json::from_str::<UploadResponse>(json);
-        assert!(result.is_err());
+        // Without a message, the whole reply is shown.
+        let err = parse_upload_response(200, r#"{"stat":"fail"}"#).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"SmugMug refused the upload: {"stat":"fail"}"#
+        );
+    }
+
+    #[test]
+    fn test_upload_response_ok() {
+        let json = r#"{"stat":"ok","method":"smugmug.images.upload","Image":{"ImageUri":"/api/v2/album/AB/image/CD-0"}}"#;
+        let result = parse_upload_response(200, json).unwrap();
+        assert_eq!(result.image_key, "CD-0");
+        assert_eq!(result.image_uri, "/api/v2/album/AB/image/CD-0");
+    }
+
+    #[test]
+    fn test_upload_response_not_json() {
+        let err = parse_upload_response(200, "<html>oops</html>").unwrap_err();
+        assert!(err.to_string().contains("<html>oops</html>"), "{err}");
+    }
+
+    /// A local server that reads an upload with `read` and then answers
+    /// with `reply` (if any). Returns its URL.
+    async fn upload_server<F, Fut>(read: F, reply: Option<&'static str>) -> String
+    where
+        F: FnOnce(tokio::net::TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = tokio::net::TcpStream> + Send,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = read(socket).await;
+            if let Some(body) = reply {
+                use tokio::io::AsyncWriteExt;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        url
+    }
+
+    /// Read until `total` bytes arrived, `chunk` at a time with `pause`
+    /// between reads.
+    async fn read_slowly(
+        mut socket: tokio::net::TcpStream,
+        total: usize,
+        chunk: usize,
+        pause: Duration,
+    ) -> tokio::net::TcpStream {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; chunk];
+        let mut got = 0;
+        while got < total {
+            match socket.read(&mut buf).await.unwrap() {
+                0 => break,
+                n => got += n,
+            }
+            tokio::time::sleep(pause).await;
+        }
+        socket
+    }
+
+    fn body_of(len: usize) -> impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static {
+        let data = Bytes::from(vec![7u8; len]);
+        futures_util::stream::iter(
+            (0..len)
+                .step_by(UPLOAD_CHUNK)
+                .map(move |i| Ok(data.slice(i..(i + UPLOAD_CHUNK).min(len)))),
+        )
+    }
+
+    fn test_limits() -> UploadLimits {
+        UploadLimits {
+            stalled: Duration::from_millis(400),
+            response: Duration::from_millis(400),
+            check_every: Duration::from_millis(50),
+        }
+    }
+
+    const OK_REPLY: &str = r#"{"stat":"ok","Image":{"ImageUri":"/api/v2/album/A/image/B-0"}}"#;
+
+    #[test]
+    fn test_timeout_messages() {
+        assert_eq!(
+            UploadTimedOut::Stalled(Duration::from_secs(300)).to_string(),
+            "upload stalled: no data sent for 5 minutes"
+        );
+        assert_eq!(
+            UploadTimedOut::NoResponse(Duration::from_secs(90)).to_string(),
+            "SmugMug didn't answer within 90 seconds of receiving the whole file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_slow_upload_that_keeps_going_succeeds() {
+        // Takes several times the stall limit, but never stops moving: a
+        // read timeout would have failed it (the 0.5.x timeouts on videos).
+        let len = 24 * 1024 * 1024;
+        let url = upload_server(
+            move |s| read_slowly(s, len, 512 * 1024, Duration::from_millis(40)),
+            Some(OK_REPLY),
+        )
+        .await;
+        let started = Instant::now();
+        // The last few MB still drain from the socket buffers after the
+        // body is handed over, so give the answer longer than that.
+        let limits = UploadLimits {
+            response: Duration::from_secs(10),
+            ..test_limits()
+        };
+        let result = post_upload(
+            &reqwest::Client::new(),
+            &url,
+            HeaderMap::new(),
+            body_of(len),
+            limits,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.image_key, "B-0");
+        assert!(started.elapsed() > test_limits().stalled * 2);
+    }
+
+    #[tokio::test]
+    async fn test_stalled_upload_fails() {
+        // The server stops reading, so the socket buffers fill up and the
+        // body stops moving.
+        let url = upload_server(
+            |s| async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                s
+            },
+            None,
+        )
+        .await;
+        let err = post_upload(
+            &reqwest::Client::new(),
+            &url,
+            HeaderMap::new(),
+            body_of(256 * 1024 * 1024),
+            test_limits(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<UploadTimedOut>(),
+            Some(UploadTimedOut::Stalled(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_upload_without_answer_fails() {
+        let len = 1024 * 1024;
+        let url = upload_server(
+            move |s| read_slowly(s, len, 64 * 1024, Duration::ZERO),
+            None,
+        )
+        .await;
+        let err = post_upload(
+            &reqwest::Client::new(),
+            &url,
+            HeaderMap::new(),
+            body_of(len),
+            test_limits(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<UploadTimedOut>(),
+            Some(UploadTimedOut::NoResponse(_))
+        ));
     }
 
     #[tokio::test]

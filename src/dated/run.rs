@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use crate::api::SmugMugClient;
 use crate::api::upload::{
-    FileUpload, UploadPayload, UploadRejected, UploadResult, UploadTarget, upload_bytes,
-    upload_file,
+    FileUpload, UploadPayload, UploadRejected, UploadResult, UploadTarget, UploadTimedOut,
+    upload_bytes, upload_file,
 };
 use crate::cache::hash_store::{HashStore, UploadedFile};
 use crate::config::{LivePhotoVideos, RawHandling};
@@ -837,6 +837,9 @@ fn is_transient(error: &anyhow::Error, target: UploadTarget<'_>) -> bool {
     let repeatable = matches!(target, UploadTarget::ReplaceImage(_));
     if let Some(rejected) = error.downcast_ref::<UploadRejected>() {
         return rejected.status == 429 || (repeatable && rejected.status >= 500);
+    }
+    if error.downcast_ref::<UploadTimedOut>().is_some() {
+        return repeatable;
     }
     match error.downcast_ref::<reqwest::Error>() {
         Some(e) if e.is_connect() => true,
