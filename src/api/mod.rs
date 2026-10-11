@@ -20,8 +20,9 @@ pub struct NodeTree {
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Time a connection may go without any data before the request fails, so
-/// a stalled connection can't hang an unattended backup. There's no limit
-/// on a whole request: a big video may take a long time to upload.
+/// a stalled connection can't hang an unattended backup. Not used for
+/// uploads: it counts time since the last byte *received*, so it would cut
+/// off any upload taking longer than this (see `upload::UploadLimits`).
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Tries per API request (see `send_retrying`).
@@ -54,6 +55,9 @@ fn retry_after(response: &reqwest::Response) -> Option<std::time::Duration> {
 
 pub struct SmugMugClient {
     client: reqwest::Client,
+    /// For uploads: no read timeout, which would fire mid-upload (see
+    /// `READ_TIMEOUT`); `upload::post_upload` watches progress instead.
+    uploads: reqwest::Client,
     api_key: String,
     api_secret: String,
     access_token: String,
@@ -85,6 +89,11 @@ impl SmugMugClient {
                 // Fails only if TLS can't be initialized, where
                 // reqwest::Client::new() would panic too.
                 .expect("Failed to set up the HTTP client (TLS initialization failed)"),
+            uploads: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .build()
+                .expect("Failed to set up the HTTP client (TLS initialization failed)"),
             api_key,
             api_secret,
             access_token,
@@ -93,9 +102,9 @@ impl SmugMugClient {
         }
     }
 
-    /// The HTTP client, so uploads reuse its connections.
-    pub(crate) fn http(&self) -> &reqwest::Client {
-        &self.client
+    /// The HTTP client for uploads, which has no read timeout.
+    pub(crate) fn upload_http(&self) -> &reqwest::Client {
+        &self.uploads
     }
 
     pub fn build_oauth_header(&self, method: &str, url: &str) -> String {
