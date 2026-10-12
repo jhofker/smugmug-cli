@@ -2,6 +2,8 @@
 
 A fast, reliable command-line tool for uploading photos to SmugMug with intelligent deduplication and automatic album organization.
 
+Note: Not affiliated with SmugMug in any way. Just a happy user.
+
 ## Features
 
 - **Simple Upload**: Upload individual files or entire directories
