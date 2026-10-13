@@ -23,7 +23,9 @@ FROM alpine:latest
 RUN apk add --no-cache ca-certificates libgcc su-exec tzdata util-linux
 
 # Copy binary from builder
-COPY --from=builder /usr/src/smugmug-cli/target/release/smugmug-cli /usr/local/bin/smugmug-cli
+COPY --from=builder /usr/src/smugmug-cli/target/release/sm /usr/local/bin/sm
+# The command's old name, for scripts that still call it
+RUN ln -s sm /usr/local/bin/smugmug-cli
 
 # License notice for rawler (LGPL-2.1), which the binary includes
 COPY THIRD-PARTY-NOTICES.md /usr/share/doc/smugmug-cli/
@@ -42,5 +44,5 @@ RUN adduser -D -u 99 -G users smugmug && \
 # Volumes for configuration and photos
 VOLUME ["/home/smugmug/.config/smugmug-cli", "/photos"]
 
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh", "smugmug-cli"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh", "sm"]
 CMD ["--help"]

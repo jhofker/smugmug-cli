@@ -64,7 +64,7 @@ fn default_read_threads() -> usize {
     2
 }
 
-/// `smugmug-cli backup`: what to back up, where to, and how often.
+/// `sm backup`: what to back up, where to, and how often.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackupConfig {
@@ -194,7 +194,7 @@ pub async fn init_config() -> Result<()> {
     println!("1. Go to https://api.smugmug.com/api/developer/apply");
     println!("2. Create an application to get your API Key and Secret");
     println!("3. Sign in through your browser when prompted to get an Access Token and Secret");
-    println!("   (or run 'smugmug-cli auth' later to refresh them)\n");
+    println!("   (or run 'sm auth' later to refresh them)\n");
 
     // Try to load defaults from .env file (if it exists)
     let _ = dotenvy::dotenv();
@@ -380,7 +380,7 @@ pub async fn init_config() -> Result<()> {
     println!(
         "\n{} {}",
         "You can now upload photos using:".cyan(),
-        "smugmug-cli upload <path>".bright_white().bold()
+        "sm upload <path>".bright_white().bold()
     );
 
     Ok(())
@@ -427,7 +427,7 @@ async fn browser_sign_in(
     Ok(pair)
 }
 
-/// `smugmug-cli auth`: obtain a new access token through the browser and
+/// `sm auth`: obtain a new access token through the browser and
 /// store it. Uses the API key/secret from the existing config, else from
 /// the environment/.env, else prompts. Creates the config if missing.
 pub async fn auth_command() -> Result<()> {
@@ -537,7 +537,7 @@ fn with_env_credentials(
         None if values.iter().all(Option::is_none) => {
             anyhow::bail!(
                 "Config file not found at: {}\n\n\
-                 Run 'smugmug-cli init' to create your configuration, or set {}.\n\
+                 Run 'sm init' to create your configuration, or set {}.\n\
                  (Tip: You can create a .env file with your credentials, and init will use them as defaults)",
                 get_config_path()?.display(),
                 CREDENTIAL_VARS.join(", ")
@@ -582,7 +582,7 @@ pub fn load_config_file() -> Result<Config> {
     if !config_path.exists() {
         anyhow::bail!(
             "Config file not found at: {}\n\n\
-             Run 'smugmug-cli init' to create your configuration.\n\
+             Run 'sm init' to create your configuration.\n\
              (Tip: You can create a .env file with your credentials, and init will use them as defaults)",
             config_path.display()
         );
@@ -705,7 +705,7 @@ mod tests {
         let err = with_env_credentials(None, env_of(&[]))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("smugmug-cli init"), "{}", err);
+        assert!(err.contains("sm init"), "{}", err);
     }
 
     #[test]

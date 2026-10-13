@@ -217,7 +217,7 @@ pub fn print_raw_selection(selection: &RawSelection, mode: RawMode, has_smugmug_
         if mode == RawMode::Original && !has_smugmug_source {
             println!(
                 "  {}",
-                "(Set raw_mode = \"auto\" in the config to upload JPEGs rendered from them, or run 'smugmug-cli init' if you have Source)"
+                "(Set raw_mode = \"auto\" in the config to upload JPEGs rendered from them, or run 'sm init' if you have Source)"
                     .bright_black()
             );
         }

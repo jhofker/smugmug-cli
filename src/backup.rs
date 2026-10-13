@@ -1,4 +1,4 @@
-//! `smugmug-cli backup`: a dated upload (see `crate::dated`) of the
+//! `sm backup`: a dated upload (see `crate::dated`) of the
 //! configured directories, repeated every `interval`, for running unattended
 //! (e.g. in a container).
 //!

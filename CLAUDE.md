@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SmugMug CLI is a Rust-based command-line tool for uploading photos to SmugMug with intelligent deduplication and automatic album organization. It uses OAuth 1.0a authentication and the SmugMug API v2.
+CLI for SmugMug (binary `sm`; crate, repo, Docker image and config/cache folders stay `smugmug-cli`) is a Rust-based command-line tool for uploading photos to SmugMug with intelligent deduplication and automatic album organization. It uses OAuth 1.0a authentication and the SmugMug API v2.
 
 ## Commits, PRs and Comments
 
@@ -45,7 +45,7 @@ cargo test --test cache_test
 cargo run -- <command>
 
 # Run installed binary
-smugmug-cli <command>
+sm <command>
 ```
 
 ## Key Architecture
