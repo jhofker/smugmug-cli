@@ -12,12 +12,10 @@ fn print_logo() {
     println!(
         "{}",
         r#"
- ____                        __  __              ____ _     ___
-/ ___| _ __ ___  _   _  ___ |  \/  |_   _  __ _ / ___| |   |_ _|
-\___ \| '_ ` _ \| | | |/ _ `| |\/| | | | |/ _` | |   | |    | |
- ___) | | | | | | |_| | (_| | |  | | |_| | (_| | |___| |___ | |
-|____/|_| |_| |_|\__,_|\__, |_|  |_|\__,_|\__, |\____|_____|___|
-                       |___/              |___/
+  ___ _ __ ___
+ / __| '_ ` _ \
+ \__ \ | | | | |
+ |___/_| |_| |_|  CLI for SmugMug
     "#
         .bright_cyan()
         .bold()
@@ -132,8 +130,8 @@ mod sort;
 mod uploader;
 
 #[derive(Parser)]
-#[command(name = "smugmug-cli")]
-#[command(about = "A CLI tool for uploading photos to SmugMug", long_about = None)]
+#[command(name = "sm")]
+#[command(about = "CLI for SmugMug: uploads photos to SmugMug (not affiliated with SmugMug)", long_about = None)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -568,7 +566,7 @@ async fn main() -> Result<()> {
             info("To get started, you'll need to set up your SmugMug API credentials.")
         );
         println!("\n{}", highlight("Run the following command to configure:"));
-        println!("  {}\n", "smugmug-cli init".bright_white().bold());
+        println!("  {}\n", "sm init".bright_white().bold());
 
         println!("{}", info("You'll need:"));
         println!(
@@ -626,7 +624,7 @@ async fn main() -> Result<()> {
                     println!("\n{}", error(&format!("Authentication failed: {}", e)));
                     println!(
                         "\n{}",
-                        warning("Please check your credentials and run 'smugmug-cli init' again.")
+                        warning("Please check your credentials and run 'sm init' again.")
                     );
                 }
             }
@@ -710,7 +708,7 @@ async fn main() -> Result<()> {
                             } else {
                                 // Album not found by name, try using the input as key directly
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -838,7 +836,7 @@ async fn main() -> Result<()> {
                                 (found.album_key.clone(), Some(found.clone()))
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -954,7 +952,7 @@ async fn main() -> Result<()> {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -993,10 +991,7 @@ async fn main() -> Result<()> {
                                     println!("  Status URI: {}", uri);
                                 }
                                 println!("\nTo wait for completion, use:");
-                                println!(
-                                    "  smugmug-cli albums get-download-link \"{}\" --wait",
-                                    album
-                                );
+                                println!("  sm albums get-download-link \"{}\" --wait", album);
                             }
                             Err(e) => {
                                 println!("\n✗ Failed to request download: {}", e);
@@ -1029,7 +1024,7 @@ async fn main() -> Result<()> {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1079,7 +1074,7 @@ async fn main() -> Result<()> {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1101,10 +1096,7 @@ async fn main() -> Result<()> {
 
                     if !image_exists {
                         println!("\n✗ Image not found in album: {}", image_key);
-                        println!(
-                            "  Use 'smugmug-cli images list {}' to see available images",
-                            album
-                        );
+                        println!("  Use 'sm images list {}' to see available images", album);
                         return Ok(());
                     }
 
@@ -1190,7 +1182,7 @@ async fn main() -> Result<()> {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1211,7 +1203,7 @@ async fn main() -> Result<()> {
                             } else {
                                 println!("\n✗ Image not found in album: {}", image_key);
                                 println!(
-                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    "  Use 'sm images list {}' to see available images",
                                     album
                                 );
                                 return Ok(());
@@ -1275,7 +1267,7 @@ async fn main() -> Result<()> {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1296,7 +1288,7 @@ async fn main() -> Result<()> {
                             } else {
                                 println!("\n✗ Image not found in album: {}", image_key);
                                 println!(
-                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    "  Use 'sm images list {}' to see available images",
                                     album
                                 );
                                 return Ok(());
@@ -1384,7 +1376,7 @@ async fn main() -> Result<()> {
                                 (found.album_key.clone(), found.name.clone())
                             } else {
                                 println!("\n✗ Source album not found: {}", source_album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1405,7 +1397,7 @@ async fn main() -> Result<()> {
                             } else {
                                 println!("\n✗ Image not found in source album: {}", image_key);
                                 println!(
-                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    "  Use 'sm images list {}' to see available images",
                                     source_album
                                 );
                                 return Ok(());
@@ -1428,7 +1420,7 @@ async fn main() -> Result<()> {
                                 (found.album_key.clone(), found.name.clone())
                             } else {
                                 println!("\n✗ Target album not found: {}", target_album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1504,7 +1496,7 @@ async fn main() -> Result<()> {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1526,10 +1518,7 @@ async fn main() -> Result<()> {
 
                     if !image_exists {
                         println!("\n✗ Image not found in album: {}", image_key);
-                        println!(
-                            "  Use 'smugmug-cli images list {}' to see available images",
-                            album
-                        );
+                        println!("  Use 'sm images list {}' to see available images", album);
                         return Ok(());
                     }
 
@@ -1592,7 +1581,7 @@ async fn main() -> Result<()> {
                                 found.album_key.clone()
                             } else {
                                 println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'smugmug-cli albums list' to see available albums");
+                                println!("  Use 'sm albums list' to see available albums");
                                 return Ok(());
                             }
                         }
@@ -1613,7 +1602,7 @@ async fn main() -> Result<()> {
                             } else {
                                 println!("\n✗ Image not found in album: {}", image_key);
                                 println!(
-                                    "  Use 'smugmug-cli images list {}' to see available images",
+                                    "  Use 'sm images list {}' to see available images",
                                     album
                                 );
                                 return Ok(());

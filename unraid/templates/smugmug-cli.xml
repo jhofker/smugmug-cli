@@ -9,11 +9,11 @@
   <Support>https://github.com/jhofker/smugmug-cli/issues</Support>
   <Project>https://github.com/jhofker/smugmug-cli</Project>
   <ReadMe>https://raw.githubusercontent.com/jhofker/smugmug-cli/main/README.md</ReadMe>
-  <Overview>Backs up a photo library to SmugMug on a schedule. Every photo and video under the Photos path goes into a private album for the day it was taken (Backup/2014/07/2014-07-12), dated from its EXIF or video metadata, its file name, or its modified time.&#xD;
+  <Overview>CLI for SmugMug (not affiliated with SmugMug) backs up a photo library to SmugMug on a schedule. Every photo and video under the Photos path goes into a private album for the day it was taken (Backup/2014/07/2014-07-12), dated from its EXIF or video metadata, its file name, or its modified time.&#xD;
 &#xD;
 After the first run, unchanged files are only checked by size and modified time (never re-read), so later runs are cheap on disks and CPU, and a run over an unchanged library makes no requests to SmugMug. Identical copies are uploaded once, edited files replace their image, RAW files are uploaded as JPEGs rendered from their embedded preview unless you have SmugMug Source, and nothing is ever deleted from SmugMug.&#xD;
 &#xD;
-You need a SmugMug API key and secret (https://api.smugmug.com/api/developer/apply) and an access token and secret for your account; running smugmug-cli auth on any computer gets you the token. The container runs at low CPU and I/O priority. See the README for exclude patterns and the .smugmugignore file.</Overview>
+You need a SmugMug API key and secret (https://api.smugmug.com/api/developer/apply) and an access token and secret for your account; running sm auth on any computer (cargo install smugmug-cli) gets you the token. The container runs at low CPU and I/O priority. See the README for exclude patterns and the .smugmugignore file.</Overview>
   <Category>Backup: Cloud: MediaApp:Photos</Category>
   <ExtraSearchTerms>smugmug photos backup upload pictures</ExtraSearchTerms>
   <Requires>A SmugMug account, API key and access token</Requires>
@@ -28,7 +28,7 @@ You need a SmugMug API key and secret (https://api.smugmug.com/api/developer/app
 
   <Config Name="SmugMug API key" Target="SMUGMUG_API_KEY" Default="" Description="From https://api.smugmug.com/api/developer/apply" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="SmugMug API secret" Target="SMUGMUG_API_SECRET" Default="" Description="From https://api.smugmug.com/api/developer/apply" Type="Variable" Display="always" Required="true" Mask="true"/>
-  <Config Name="SmugMug access token" Target="SMUGMUG_ACCESS_TOKEN" Default="" Description="Run smugmug-cli auth on any computer to get one" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="SmugMug access token" Target="SMUGMUG_ACCESS_TOKEN" Default="" Description="Run sm auth on any computer to get one" Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="SmugMug access token secret" Target="SMUGMUG_ACCESS_TOKEN_SECRET" Default="" Description="Comes with the access token" Type="Variable" Display="always" Required="true" Mask="true"/>
 
   <Config Name="SmugMug folder" Target="SMUGMUG_BACKUP_FOLDER" Default="Backup" Description="SmugMug folder the year/month/day albums go in (created private)" Type="Variable" Display="always" Required="false" Mask="false">Backup</Config>

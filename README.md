@@ -1,8 +1,10 @@
-# SmugMug CLI
+# CLI for SmugMug
 
 A fast, reliable command-line tool for uploading photos to SmugMug with intelligent deduplication and automatic album organization.
 
 Note: Not affiliated with SmugMug in any way. Just a happy user.
+
+The command is `sm` (it used to be `smugmug-cli`); the crate, Docker image and config folders keep the `smugmug-cli` name.
 
 ## Features
 
@@ -20,7 +22,7 @@ Note: Not affiliated with SmugMug in any way. Just a happy user.
 ### From crates.io
 
 ```bash
-cargo install smugmug-cli
+cargo install smugmug-cli   # installs the `sm` command
 ```
 
 Requires Rust 1.89 or newer.
@@ -114,23 +116,23 @@ SMUGMUG_ACCESS_TOKEN=your_access_token_here
 SMUGMUG_ACCESS_TOKEN_SECRET=your_access_token_secret_here
 
 # Test authentication
-smugmug-cli test-auth
+sm test-auth
 
 # Upload photos
-smugmug-cli upload /path/to/photos
+sm upload /path/to/photos
 ```
 
 ### Method 2: Using Config File (Recommended for Production)
 
 ```bash
 # Interactive setup
-smugmug-cli init
+sm init
 
 # Test authentication
-smugmug-cli test-auth
+sm test-auth
 
 # Upload photos
-smugmug-cli upload /path/to/photos
+sm upload /path/to/photos
 ```
 
 Configuration is stored in `~/.config/smugmug-cli/config.toml`
@@ -138,7 +140,7 @@ Configuration is stored in `~/.config/smugmug-cli/config.toml`
 ### Upload with Options
 
 ```bash
-smugmug-cli upload /path/to/photos \
+sm upload /path/to/photos \
   --threads 8 \
   --album "Vacation 2025"
 ```
@@ -179,7 +181,7 @@ live_photo_videos = "upload"
 [deduplication]
 enabled = true
 
-# For `smugmug-cli backup`
+# For `sm backup`
 [backup]
 sources = ["/photos"]
 folder = "Backup"
@@ -197,13 +199,13 @@ interval = "6h"
 
 ### Setup & Authentication
 
-- `smugmug-cli init` - Initialize configuration and authenticate with SmugMug (interactive setup)
-- `smugmug-cli auth` - Sign in through your browser to get (or refresh) an access token
-- `smugmug-cli test-auth` - Test that your credentials are working
+- `sm init` - Initialize configuration and authenticate with SmugMug (interactive setup)
+- `sm auth` - Sign in through your browser to get (or refresh) an access token
+- `sm test-auth` - Test that your credentials are working
 
 ### Upload
 
-- `smugmug-cli upload <PATH>` - Upload photos from the specified path
+- `sm upload <PATH>` - Upload photos from the specified path
   - `--threads <N>` - Number of concurrent upload threads (default: 4)
   - `--album <NAME>` - Album name (creates if doesn't exist, private by default)
   - `--parent <PATH>` - Parent folder path (e.g., "2024/Travel")
@@ -266,7 +268,7 @@ Used by `upload` without `--album` and by `backup`:
   folders and day albums are created only when a file needs them, all private. The folders it
   creates list their contents by name, ascending, so years, months and days read in order
   (SmugMug's own default is newest-modified first). Folders that already exist keep their sort
-  order; `smugmug-cli sort Backup --folders-by name --recursive` fixes them (see Sort below).
+  order; `sm sort Backup --folders-by name --recursive` fixes them (see Sort below).
 - **Duplicates** (the same content at several paths, e.g. a backup copy of a folder) are
   uploaded once; the other copies are linked to that image. A file already on SmugMug in
   another album (uploaded with `--album`, say) is added to its day album rather than
@@ -287,7 +289,7 @@ Nothing is ever deleted from SmugMug: removing or moving a local file leaves its
 
 ### Backup
 
-- `smugmug-cli backup [SOURCES...]` - Back up directories into albums by date, again every interval
+- `sm backup [SOURCES...]` - Back up directories into albums by date, again every interval
   - `--folder <NAME>` - SmugMug folder to back up into (default: `Backup`)
   - `--exclude <PATTERN>` - Leave out matching paths (.gitignore syntax, relative to each source; repeatable)
   - `--interval <TIME>` - Time between the end of one run and the start of the next (`30m`, `6h`, `1d`)
@@ -310,7 +312,7 @@ the cache directory belongs on the SSD pool (e.g. `/mnt/user/appdata/smugmug-cli
 
 ### Sort
 
-- `smugmug-cli sort <PATH>` - Set how a folder lists its contents or an album lists its photos
+- `sm sort <PATH>` - Set how a folder lists its contents or an album lists its photos
   - `--folders-by <HOW>` - How folders list their contents: `name`, `date-added`, `date-modified` or `manual`
   - `--albums-by <HOW>` - How albums list their photos: `date-taken`, `date-uploaded`, `date-modified`, `filename`, `caption` or `manual`
   - `--direction <asc|desc>` - Default `asc`
@@ -325,49 +327,49 @@ SmugMug's default for a new folder is date modified, newest first, which is what
 versions before 0.5.1 have:
 
 ```sh
-smugmug-cli sort Backup --folders-by name --recursive --dry-run   # look first
-smugmug-cli sort Backup --folders-by name --recursive
+sm sort Backup --folders-by name --recursive --dry-run   # look first
+sm sort Backup --folders-by name --recursive
 ```
 
 ### Albums
 
-- `smugmug-cli albums list` - List all albums
-- `smugmug-cli albums create <NAME>` - Create a new album (private by default)
+- `sm albums list` - List all albums
+- `sm albums create <NAME>` - Create a new album (private by default)
   - `--privacy <LEVEL>` - Set privacy level (private, unlisted, public) - defaults to private
-- `smugmug-cli albums delete <ALBUM>` - Delete an album
+- `sm albums delete <ALBUM>` - Delete an album
   - `--force` - Force deletion without confirmation
-- `smugmug-cli albums download <ALBUM> [OPTIONS]` - Download all images from an album
+- `sm albums download <ALBUM> [OPTIONS]` - Download all images from an album
   - `--output <DIR>` - Output directory (default: current directory)
   - `--threads <N>` - Number of concurrent download threads (default: 4)
-- `smugmug-cli albums tree` - Show folder/album tree structure
-- `smugmug-cli albums settings <ALBUM> [OPTIONS]` - Update album settings
+- `sm albums tree` - Show folder/album tree structure
+- `sm albums settings <ALBUM> [OPTIONS]` - Update album settings
   - `--privacy <LEVEL>` - Set privacy (public, unlisted, private)
   - `--description <TEXT>` - Set description
   - `--keywords <KEYWORDS>` - Set keywords (semicolon-separated)
   - `--sort-method <METHOD>` - Set sort method (Position, Caption, FileName, DateTimeOriginal, DateTimeUploaded)
   - `--sort-direction <DIR>` - Set sort direction (asc, desc)
-- `smugmug-cli albums get-download-link <ALBUM>` - Get album download link (ZIP file)
+- `sm albums get-download-link <ALBUM>` - Get album download link (ZIP file)
   - `--wait` - Wait for download generation (polls until ready)
 
 ### Images
 
-- `smugmug-cli images list <ALBUM>` - List images in an album
-- `smugmug-cli images info <ALBUM> <IMAGE_KEY>` - Show detailed information about an image
-- `smugmug-cli images delete <ALBUM> <IMAGE_KEY>` - Delete an image
+- `sm images list <ALBUM>` - List images in an album
+- `sm images info <ALBUM> <IMAGE_KEY>` - Show detailed information about an image
+- `sm images delete <ALBUM> <IMAGE_KEY>` - Delete an image
   - `--force` - Force deletion without confirmation
-- `smugmug-cli images update <ALBUM> <IMAGE_KEY> [OPTIONS]` - Update image metadata
+- `sm images update <ALBUM> <IMAGE_KEY> [OPTIONS]` - Update image metadata
   - `--caption <TEXT>` - Set image caption
   - `--title <TEXT>` - Set image title
   - `--keywords <KEYWORDS>` - Set keywords (semicolon-separated)
   - `--latitude <LAT>` - Set latitude
   - `--longitude <LON>` - Set longitude
-- `smugmug-cli images move <SOURCE_ALBUM> <IMAGE_KEY> <TARGET_ALBUM>` - Move image to a different album
+- `sm images move <SOURCE_ALBUM> <IMAGE_KEY> <TARGET_ALBUM>` - Move image to a different album
   - `--force` - Force move without confirmation
 
 ### Comments
 
-- `smugmug-cli comments list <ALBUM> <IMAGE_KEY>` - List comments on an image
-- `smugmug-cli comments create <ALBUM> <IMAGE_KEY> [OPTIONS]` - Create a new comment on an image
+- `sm comments list <ALBUM> <IMAGE_KEY>` - List comments on an image
+- `sm comments create <ALBUM> <IMAGE_KEY> [OPTIONS]` - Create a new comment on an image
   - `--text <TEXT>` - Comment text (required)
   - `--name <NAME>` - Commenter name
   - `--email <EMAIL>` - Commenter email
@@ -375,8 +377,8 @@ smugmug-cli sort Backup --folders-by name --recursive
 
 ### Cache
 
-- `smugmug-cli status` - Show cache statistics and upload history
-- `smugmug-cli cache clear` - Clear the local deduplication cache
+- `sm status` - Show cache statistics and upload history
+- `sm cache clear` - Clear the local deduplication cache
 
 ## Development
 
@@ -399,7 +401,7 @@ cargo test
 1. Go to https://api.smugmug.com/api/developer/apply
 2. Create a new application
 3. Note your API Key and API Secret
-4. Use these during `smugmug-cli init`
+4. Use these during `sm init`
 
 ## License
 

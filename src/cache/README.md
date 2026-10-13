@@ -72,7 +72,7 @@ store and file index, plus `last_run.json`), via the `directories` crate.
 
 #### `clear_cache() -> Result<()>`
 
-Clears the deduplication cache. Used by the `smugmug-cli cache clear` command.
+Clears the deduplication cache. Used by the `sm cache clear` command.
 
 ## Usage Example
 

@@ -1,4 +1,4 @@
-//! `smugmug-cli sort`: how folders list their contents and how albums list
+//! `sm sort`: how folders list their contents and how albums list
 //! their photos, for one folder or album or, with `--recursive`, everything
 //! under it.
 //!

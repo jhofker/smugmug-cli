@@ -29,7 +29,7 @@ name = "smugmug_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "smugmug-cli"
+name = "sm"
 path = "src/main.rs"
 
 [dependencies]
