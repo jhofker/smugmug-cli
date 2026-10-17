@@ -64,6 +64,8 @@ pub struct SmugMugClient {
     access_token_secret: String,
     /// The authenticated user's nickname and root node URI, fetched once.
     auth_user: tokio::sync::OnceCell<AuthUser>,
+    /// Album template applied to every album `create_album` makes.
+    album_template: std::sync::OnceLock<String>,
 }
 
 /// Who the client is signed in as.
@@ -99,7 +101,18 @@ impl SmugMugClient {
             access_token,
             access_token_secret,
             auth_user: tokio::sync::OnceCell::new(),
+            album_template: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Apply this album template (its URI, from `list_album_templates`) to
+    /// every album this client creates from now on. Can be set once.
+    pub fn set_album_template(&self, template_uri: String) {
+        let _ = self.album_template.set(template_uri);
+    }
+
+    pub(crate) fn album_template(&self) -> Option<&str> {
+        self.album_template.get().map(String::as_str)
     }
 
     /// The HTTP client for uploads, which has no read timeout.

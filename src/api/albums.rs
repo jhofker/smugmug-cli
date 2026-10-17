@@ -245,6 +245,24 @@ struct AlbumResponseData {
     album: Album,
 }
 
+/// Saved album settings (privacy, sort, watermark, downloads...), as
+/// `user/<nick>!albumtemplates` lists them.
+#[derive(Debug, Deserialize, Clone, PartialEq)]
+pub struct AlbumTemplate {
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "Uri")]
+    pub uri: String,
+}
+
+/// The template named `name` (ignoring case).
+pub fn find_template<'a>(templates: &'a [AlbumTemplate], name: &str) -> Option<&'a AlbumTemplate> {
+    templates
+        .iter()
+        .find(|t| t.name == name)
+        .or_else(|| templates.iter().find(|t| t.name.eq_ignore_ascii_case(name)))
+}
+
 #[derive(Debug, Default)]
 pub struct AlbumSettingsUpdate {
     pub privacy: Option<String>,
@@ -578,7 +596,49 @@ impl SmugMugClient {
             ));
         }
 
+        if let Some(template_uri) = self.album_template() {
+            // The album exists either way; a template that doesn't apply
+            // shouldn't fail the upload that needed the album.
+            if let Err(e) = self
+                .apply_album_template(&album.album_key, template_uri)
+                .await
+            {
+                eprintln!(
+                    "Warning: created album '{}' but couldn't apply the album template: {}",
+                    album.name, e
+                );
+            }
+        }
+
         Ok(album)
+    }
+
+    /// Give an album the settings of an album template (its URI).
+    pub async fn apply_album_template(&self, album_key: &str, template_uri: &str) -> Result<()> {
+        self.apply_album_template_at(
+            &format!("https://api.smugmug.com/api/v2/album/{}", album_key),
+            template_uri,
+        )
+        .await
+    }
+
+    async fn apply_album_template_at(&self, url: &str, template_uri: &str) -> Result<()> {
+        let body = serde_json::json!({ "AlbumTemplateUri": template_uri });
+        let response = self.patch_with_auth(url, body).await?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("{} - {}", status, response.text().await?);
+        }
+        Ok(())
+    }
+
+    /// The signed-in user's album templates.
+    pub async fn list_album_templates(&self) -> Result<Vec<AlbumTemplate>> {
+        let url = format!(
+            "https://api.smugmug.com/api/v2/user/{}!albumtemplates",
+            self.auth_user().await?.nickname
+        );
+        self.get_all_pages(&url, "AlbumTemplate").await
     }
 
     pub async fn find_album_in_folder(
@@ -1995,5 +2055,49 @@ mod tests {
                 "SortDirection": "Ascending"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn apply_album_template_patches_the_template_uri() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("PATCH", "/api/v2/album/ABC")
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"AlbumTemplateUri": "/api/v2/albumtemplate/T1"}),
+            ))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        client
+            .apply_album_template_at(
+                &format!("{}/api/v2/album/ABC", server.url()),
+                "/api/v2/albumtemplate/T1",
+            )
+            .await
+            .unwrap();
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn find_template_prefers_an_exact_name() {
+        let t = |name: &str, uri: &str| AlbumTemplate {
+            name: name.into(),
+            uri: uri.into(),
+        };
+        let templates = vec![t("family", "/a"), t("Family", "/b"), t("Clients", "/c")];
+        assert_eq!(find_template(&templates, "Family").unwrap().uri, "/b");
+        assert_eq!(find_template(&templates, "CLIENTS").unwrap().uri, "/c");
+        assert!(find_template(&templates, "Work").is_none());
+    }
+
+    #[test]
+    fn client_template_is_set_once() {
+        let client = create_test_client();
+        assert_eq!(client.album_template(), None);
+        client.set_album_template("/api/v2/albumtemplate/T1".into());
+        client.set_album_template("/api/v2/albumtemplate/T2".into());
+        assert_eq!(client.album_template(), Some("/api/v2/albumtemplate/T1"));
     }
 }
