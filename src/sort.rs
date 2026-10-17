@@ -230,6 +230,9 @@ fn album_item(node: &ChildNode, path: String) -> Option<Item> {
     })
 }
 
+/// Plain output reports the listing every this many folders.
+const LIST_REPORT_EVERY: usize = 50;
+
 /// What the user sees while a run goes on: a spinner with a running count
 /// while the tree is listed (which is most of the wait on a big tree), then a
 /// progress bar for the updates. When output isn't a terminal (a log, cron)
@@ -237,6 +240,8 @@ fn album_item(node: &ChildNode, path: String) -> Option<Item> {
 struct Progress {
     interactive: bool,
     bar: ProgressBar,
+    /// Folders listed as of the last plain-text report (when not a terminal).
+    reported: std::cell::Cell<usize>,
 }
 
 impl Progress {
@@ -250,18 +255,35 @@ impl Progress {
         } else {
             ProgressBar::hidden()
         };
-        Progress { interactive, bar }
+        Progress {
+            interactive,
+            bar,
+            reported: std::cell::Cell::new(0),
+        }
     }
 
     fn looking_up(&self, path: &str) {
-        self.bar.set_message(format!("Looking up {}...", path));
+        if self.interactive {
+            self.bar.set_message(format!("Looking up {}...", path));
+        } else {
+            println!("Looking up {}...", path);
+        }
     }
 
     fn listed(&self, folders: usize, albums: usize) {
-        self.bar.set_message(format!(
-            "Listing what's under it: {} folders and {} albums found",
-            folders, albums
-        ));
+        if self.interactive {
+            self.bar.set_message(format!(
+                "Listing what's under it: {} folders and {} albums found",
+                folders, albums
+            ));
+        } else if folders >= self.reported.get() + LIST_REPORT_EVERY {
+            // A line per folder would be hundreds
+            self.reported.set(folders);
+            println!(
+                "  listed {} folders and {} albums so far...",
+                folders, albums
+            );
+        }
     }
 
     /// Switch from the spinner to a bar for `total` updates.
