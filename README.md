@@ -177,6 +177,8 @@ raw_mode = "auto"
 read_threads = 2
 # Video half of a Live Photo (IMG_1234.HEIC + IMG_1234.MOV): "upload" or "skip"
 live_photo_videos = "upload"
+# Album template (by name, see `sm albums templates`) for albums uploads create
+# album_template = "Family"
 
 [deduplication]
 enabled = true
@@ -193,6 +195,7 @@ interval = "6h"
 # upload_threads = 6
 # read_threads = 2
 # live_photo_videos = "skip"
+# album_template = "Backup"
 ```
 
 ## Commands
@@ -216,6 +219,12 @@ interval = "6h"
   - `--check-remote` - Check SmugMug for existing files by MD5 hash (slower but more reliable)
   - `--no-cache` - Disable local cache (always check files, even if previously uploaded)
   - `--raw <MODE>` - How to handle RAW files (`auto`, `render`, `original`, `skip`), overriding `raw_mode` in the config
+  - `--template <NAME>` - Album template for the albums this upload creates, overriding `album_template` in the config
+
+**Album templates** are album settings saved on SmugMug (privacy, sorting, watermark, downloads
+and so on; "Save as template" when editing an album). With `--template` or `album_template`,
+every album an upload or backup creates gets that template's settings, including its privacy.
+Albums that already exist are left alone. `sm albums templates` lists your templates.
 
 **Where files go:** with no `--album`, each file goes into a private album for the day it was
 taken, `YEAR/MONTH/YEAR-MONTH-DAY` (e.g. `Uploads/2014/07/2014-07-12`), inside the
@@ -297,6 +306,7 @@ Nothing is ever deleted from SmugMug: removing or moving a local file leaves its
   - `--threads <N>` / `--read-threads <N>` - Concurrent uploads / file reads
   - `--dry-run` - Show how many files would go into which years and days (reads only metadata; contacts nothing)
   - `--raw <MODE>` - RAW handling, as for `upload`
+  - `--template <NAME>` - Album template for new albums (default: `album_template` in `[backup]`, then `[upload]`; env `SMUGMUG_BACKUP_TEMPLATE`)
 
 Everything can also be set in the `[backup]` section of the config, and sources, folder and
 interval through `SMUGMUG_BACKUP_SOURCES` (comma-separated), `SMUGMUG_BACKUP_FOLDER` and
@@ -336,6 +346,8 @@ sm sort Backup --folders-by name --recursive
 - `sm albums list` - List all albums
 - `sm albums create <NAME>` - Create a new album (private by default)
   - `--privacy <LEVEL>` - Set privacy level (private, unlisted, public) - defaults to private
+  - `--template <NAME>` - Give the album an album template's settings
+- `sm albums templates` - List your album templates
 - `sm albums delete <ALBUM>` - Delete an album
   - `--force` - Force deletion without confirmation
 - `sm albums download <ALBUM> [OPTIONS]` - Download all images from an album

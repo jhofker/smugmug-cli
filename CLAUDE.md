@@ -107,6 +107,8 @@ RAW files follow `upload.raw_mode` / `--raw` (`RawMode::handling` turns it into 
 
 SmugMug list endpoints (`!albums`, `!images`, `!comments`, `!children`, ...) return one page per request (often 100 items, sometimes 50) with the next page in `Response.Pages.NextPage`. Read lists through `SmugMugClient::get_all_pages(url, locator)`, which follows every page; a single `get_with_auth` on a list endpoint silently drops everything after the first page. (The `!children` lookups in `albums.rs` page by hand so they can stop as soon as they find a match; `list_children` reads them all.) `auth_user()` caches the signed-in user's nickname and root node per client.
 
+Album templates (`user/<nick>!albumtemplates`, `--template`, `album_template` in `[upload]`/`[backup]`): `main.rs` resolves the name once (`use_album_template`, skipped on dry runs) and `SmugMugClient::set_album_template` stores the template URI; `create_album` then PATCHes `{"AlbumTemplateUri": uri}` onto every album it creates (a failure only warns), so dated, single-album and `--structure` uploads all pick it up. Existing albums are never changed.
+
 SmugMug's Library ("All Media") would be the natural default destination, but its endpoints (`upload.smugmug.com/api/v2/library`, `/api/v2/library!assets`) return 404 to OAuth API keys as of 2026-09; `api::upload::upload_to_library` and the hidden `debug` commands are kept for when that changes.
 
 ### Dated uploads and `backup`

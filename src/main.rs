@@ -222,6 +222,12 @@ enum Commands {
         /// their embedded previews, or nothing. Default: auto
         #[arg(long, value_enum)]
         raw: Option<config::RawMode>,
+
+        /// Album template (by name) for the albums this upload creates,
+        /// overriding `album_template` in the config. Albums that already
+        /// exist are left as they are. See `sm albums templates`
+        #[arg(long, value_name = "NAME")]
+        template: Option<String>,
     },
 
     /// Set how a folder lists its contents or an album lists its photos,
@@ -309,6 +315,11 @@ enum Commands {
         /// How to handle RAW files, overriding `raw_mode` in the config
         #[arg(long, value_enum)]
         raw: Option<config::RawMode>,
+
+        /// Album template (by name) for the albums a backup creates
+        /// (default: [backup] album_template, then [upload] album_template)
+        #[arg(long, value_name = "NAME", env = "SMUGMUG_BACKUP_TEMPLATE")]
+        template: Option<String>,
     },
 
     /// Show cache status and statistics
@@ -341,7 +352,15 @@ enum AlbumCommands {
         /// Privacy level (private, unlisted, public) - defaults to private
         #[arg(long, default_value = "private")]
         privacy: String,
+
+        /// Album template (by name) to give the new album its settings;
+        /// see `sm albums templates`
+        #[arg(long, value_name = "NAME")]
+        template: Option<String>,
     },
+
+    /// List your album templates (saved album settings, made on SmugMug)
+    Templates,
 
     /// Delete an album
     Delete {
@@ -656,7 +675,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                AlbumCommands::Create { name, privacy } => {
+                AlbumCommands::Templates => {
+                    let templates = client.list_album_templates().await?;
+                    if templates.is_empty() {
+                        println!(
+                            "No album templates. Make them on SmugMug when creating or editing an album (\"Save as template\")."
+                        );
+                    } else {
+                        for template in templates {
+                            println!("{}", template.name);
+                        }
+                    }
+                }
+                AlbumCommands::Create {
+                    name,
+                    privacy,
+                    template,
+                } => {
                     // Validate and normalize privacy value
                     let normalized_privacy = match privacy.to_lowercase().as_str() {
                         "public" => "Public",
@@ -672,6 +707,7 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    use_album_template(&client, template, false).await?;
                     println!(
                         "Creating album: {} ({})",
                         name,
@@ -1698,6 +1734,7 @@ async fn main() -> Result<()> {
             read_threads,
             dry_run,
             raw,
+            template,
         } => {
             let cfg = config::load_config()?;
             let backup = &cfg.backup;
@@ -1767,6 +1804,11 @@ async fn main() -> Result<()> {
                 cfg.auth.access_token,
                 cfg.auth.access_token_secret,
             ));
+            let template = template
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| backup.album_template.clone())
+                .or_else(|| cfg.upload.album_template.clone());
+            use_album_template(&client, template, dry_run).await?;
             backup::run(client, options, interval).await?;
         }
         Commands::Upload {
@@ -1781,6 +1823,7 @@ async fn main() -> Result<()> {
             check_remote,
             no_cache,
             raw,
+            template,
         } => {
             let cfg = config::load_config()?;
             let raw_mode = raw.unwrap_or(cfg.upload.raw_mode);
@@ -1790,6 +1833,12 @@ async fn main() -> Result<()> {
                 cfg.auth.access_token,
                 cfg.auth.access_token_secret,
             ));
+            use_album_template(
+                &client,
+                template.or_else(|| cfg.upload.album_template.clone()),
+                dry_run,
+            )
+            .await?;
 
             // With no album, folder or mode given, upload into albums by the
             // day each file was taken, in the default folder.
@@ -2238,6 +2287,46 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Look up the album template called `name` and have the client apply it to
+/// every album it creates. Nothing to do without a name, or on a dry run
+/// (which creates no albums). Unknown names are an error listing the
+/// account's templates, before anything is uploaded.
+async fn use_album_template(
+    client: &api::SmugMugClient,
+    name: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    let Some(name) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) else {
+        return Ok(());
+    };
+    if dry_run {
+        return Ok(());
+    }
+    let templates = client.list_album_templates().await?;
+    match api::albums::find_template(&templates, &name) {
+        Some(template) => {
+            println!("New albums use template: {}", template.name);
+            client.set_album_template(template.uri.clone());
+            Ok(())
+        }
+        None if templates.is_empty() => {
+            anyhow::bail!(
+                "No album template '{}': this account has no album templates",
+                name
+            )
+        }
+        None => anyhow::bail!(
+            "No album template '{}'. Templates: {}",
+            name,
+            templates
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 #[cfg(test)]

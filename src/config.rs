@@ -45,6 +45,10 @@ pub struct UploadConfig {
     /// `LivePhotoVideos`).
     #[serde(default)]
     pub live_photo_videos: LivePhotoVideos,
+    /// Album template (by name, see `sm albums templates`) for the albums
+    /// uploads create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_template: Option<String>,
 }
 
 /// The video half of a Live Photo: a short video with the same name as a
@@ -84,6 +88,9 @@ pub struct BackupConfig {
     pub read_threads: Option<usize>,
     /// Overrides `upload.live_photo_videos` for backups.
     pub live_photo_videos: Option<LivePhotoVideos>,
+    /// Overrides `upload.album_template` for backups.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_template: Option<String>,
 }
 
 impl Default for BackupConfig {
@@ -96,6 +103,7 @@ impl Default for BackupConfig {
             upload_threads: None,
             read_threads: None,
             live_photo_videos: None,
+            album_template: None,
         }
     }
 }
@@ -168,6 +176,7 @@ impl Default for Config {
                 raw_mode: RawMode::default(),
                 read_threads: default_read_threads(),
                 live_photo_videos: LivePhotoVideos::default(),
+                album_template: None,
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
@@ -639,6 +648,7 @@ mod tests {
                 raw_mode: RawMode::default(),
                 read_threads: default_read_threads(),
                 live_photo_videos: LivePhotoVideos::default(),
+                album_template: None,
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
@@ -1139,6 +1149,7 @@ cache_path = "/absolute/path/cache.db"
             raw_mode: RawMode::default(),
             read_threads: 2,
             live_photo_videos: LivePhotoVideos::default(),
+            album_template: None,
         };
 
         let debug_string = format!("{:?}", upload);
@@ -1176,6 +1187,7 @@ cache_path = "/absolute/path/cache.db"
                 raw_mode: RawMode::default(),
                 read_threads: default_read_threads(),
                 live_photo_videos: LivePhotoVideos::default(),
+                album_template: None,
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
