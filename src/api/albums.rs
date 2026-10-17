@@ -400,6 +400,9 @@ impl SmugMugClient {
     /// return its node URI. `privacy` (Public, Unlisted or Private) is set if
     /// given. SmugMug lists a new folder's contents by date modified, newest
     /// first; see `create_sorted_folder` for by name.
+    // Public library API (released in 0.5.0) that the binary itself doesn't
+    // call, so its build would otherwise warn.
+    #[allow(dead_code)]
     pub async fn create_folder(
         &self,
         parent_node_uri: &str,
