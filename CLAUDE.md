@@ -55,6 +55,7 @@ sm <command>
   - `mod.rs`: Core client with OAuth header building (`build_oauth_header`)
   - `albums.rs`: Album listing, creation, folder path handling
   - `images.rs`: Image metadata fetching
+  - `profile.rs`: `user/<nick>!profile` (GET, PATCH) and `!bioimage`/`!coverimage` (read only: how to set them isn't known)
   - `upload.rs`: Image upload operations
 - **src/cache/**: Local deduplication using sled embedded database
   - `hash_store.rs`: SHA256 hash storage mapping to uploaded file metadata
