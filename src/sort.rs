@@ -138,11 +138,9 @@ impl SortBackend for SmugMugClient {
         self.update_album_settings(
             album_key,
             AlbumSettingsUpdate {
-                privacy: None,
-                description: None,
-                keywords: None,
                 sort_method: Some(method.to_string()),
                 sort_direction: Some(direction.to_string()),
+                ..Default::default()
             },
         )
         .await
