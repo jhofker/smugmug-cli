@@ -72,7 +72,7 @@ sm <command>
   - `run.rs`: the pipeline (see below); `Uploads` trait so tests run against the fake
 - **src/backup.rs**: `backup` command: interval loop, `last_run.json`
 - **src/sort.rs**: `sort` command: a folder's child order (node `SortMethod`: Name/DateAdded/DateModified/SortIndex) and an album's photo order (album `SortMethod`: Position/Caption/Filename/Date Uploaded/Date Modified/Date Taken, spelled with spaces) are different settings, given as `--folders-by`/`--albums-by` so `--recursive` only touches the kind asked for; skips nodes already right; `SortBackend` trait with an in-memory fake for tests
-- **src/downloader/**: Album download functionality
+- **src/downloader/**: Album download functionality; `--size` reads `image/<key>!sizedetails` (`UsableSizes`, `LargestImageSize`, `ImageSize<Name>` with `Url`/`Ext`/`Width`/`Height`; X2Large is 1280 px, X4Large 2048) and falls back to the largest size; videos keep `ArchivedUri`
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
   - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB
   - `jpeg.rs`: finds embedded JPEG previews by walking the file for well-formed JPEG streams (rejects lossless SOF3 streams, which are sensor data in CR2/DNG)
