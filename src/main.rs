@@ -448,6 +448,13 @@ enum ImageCommands {
         album: String,
     },
 
+    /// Your most used keywords, most used first
+    Keywords {
+        /// How many (1 to 2000; SmugMug's default without it)
+        #[arg(short = 'n', long, value_parser = clap::value_parser!(u32).range(1..=2000))]
+        count: Option<u32>,
+    },
+
     /// Show detailed information about an image
     Info {
         /// Album name or key
@@ -518,22 +525,22 @@ enum ImageCommands {
 
 #[derive(Subcommand)]
 enum CommentCommands {
-    /// List comments on an image
+    /// List comments on an album, or on one of its images
     List {
         /// Album name or key
         album: String,
 
-        /// Image key
-        image_key: String,
+        /// Image key (without it, the album's own comments)
+        image_key: Option<String>,
     },
 
-    /// Create a new comment on an image
+    /// Comment on an album, or on one of its images
     Create {
         /// Album name or key
         album: String,
 
-        /// Image key
-        image_key: String,
+        /// Image key (without it, the comment goes on the album)
+        image_key: Option<String>,
 
         /// Comment text
         #[arg(short, long)]
@@ -1011,6 +1018,15 @@ async fn main() -> Result<()> {
             ));
 
             match command {
+                ImageCommands::Keywords { count } => {
+                    let keywords = client.top_keywords(count).await?;
+                    if keywords.is_empty() {
+                        println!("No keywords yet.");
+                    }
+                    for keyword in keywords {
+                        println!("{}", keyword);
+                    }
+                }
                 ImageCommands::List { album } => {
                     println!("Looking up album: {}", album);
 
@@ -1475,85 +1491,41 @@ async fn main() -> Result<()> {
         }
         Commands::Comments { command } => {
             let cfg = config::load_config()?;
-            let client = std::sync::Arc::new(api::SmugMugClient::new(
+            let client = api::SmugMugClient::new(
                 cfg.auth.api_key,
                 cfg.auth.api_secret,
                 cfg.auth.access_token,
                 cfg.auth.access_token_secret,
-            ));
+            );
 
             match command {
                 CommentCommands::List { album, image_key } => {
-                    println!("Looking up album: {}", album);
-
-                    // Try to find album by name or use as key
-                    let album_key_resolved = match client.list_albums().await {
-                        Ok(albums) => {
-                            if let Some(found) = albums
-                                .iter()
-                                .find(|a| a.name == album || a.album_key == album)
-                            {
-                                found.album_key.clone()
-                            } else {
-                                println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'sm albums list' to see available albums");
-                                return Ok(());
-                            }
-                        }
-                        Err(e) => {
-                            println!("\n✗ Failed to list albums: {}", e);
-                            return Ok(());
-                        }
-                    };
-
-                    // Verify the image exists in the album
-                    println!("Verifying image exists...");
-                    let image_exists = match client.list_album_images(&album_key_resolved).await {
-                        Ok(images) => images.iter().any(|img| img.image_key == image_key),
-                        Err(e) => {
-                            println!("\n✗ Failed to verify image: {}", e);
-                            return Ok(());
-                        }
-                    };
-
-                    if !image_exists {
-                        println!("\n✗ Image not found in album: {}", image_key);
-                        println!("  Use 'sm images list {}' to see available images", album);
+                    let Some((album_key, image)) =
+                        find_comment_target(&client, &album, image_key.as_deref()).await?
+                    else {
                         return Ok(());
-                    }
-
-                    // List comments
+                    };
+                    let target = match &image {
+                        Some(image) => api::comments::CommentTarget::Image(&image.image_key),
+                        None => api::comments::CommentTarget::Album(&album_key),
+                    };
+                    let what = match &image {
+                        Some(image) => format!("image {}", image.file_name),
+                        None => format!("album {}", album),
+                    };
                     println!("Fetching comments...\n");
-                    match client.list_image_comments(&image_key).await {
+                    match client.list_comments(target).await {
+                        Ok(comments) if comments.is_empty() => {
+                            println!("No comments on {}.", what);
+                        }
                         Ok(comments) => {
-                            if comments.is_empty() {
-                                println!("No comments found for this image.");
-                            } else {
-                                println!(
-                                    "✓ Found {} comments for image {}:\n",
-                                    format_number(comments.len()),
-                                    image_key
-                                );
-                                for comment in comments {
-                                    if let Some(key) = &comment.comment_key {
-                                        println!("  Comment Key: {}", key);
-                                    }
-                                    if let Some(name) = &comment.name {
-                                        println!("  Author:      {}", name);
-                                    } else {
-                                        println!("  Author:      Anonymous");
-                                    }
-                                    if let Some(rating) = comment.rating {
-                                        let stars = "★".repeat(rating as usize)
-                                            + &"☆".repeat((5 - rating) as usize);
-                                        println!("  Rating:      {} ({}/5)", stars, rating);
-                                    }
-                                    println!("  Text:        {}", comment.text);
-                                    if let Some(date) = &comment.date {
-                                        println!("  Date:        {}", date);
-                                    }
-                                    println!();
-                                }
+                            println!(
+                                "✓ Found {} comments on {}:\n",
+                                format_number(comments.len()),
+                                what
+                            );
+                            for comment in comments {
+                                print_comment(&comment);
                             }
                         }
                         Err(e) => {
@@ -1569,53 +1541,20 @@ async fn main() -> Result<()> {
                     email,
                     rating,
                 } => {
-                    println!("Looking up album: {}", album);
-
-                    // Try to find album by name or use as key
-                    let album_key_resolved = match client.list_albums().await {
-                        Ok(albums) => {
-                            if let Some(found) = albums
-                                .iter()
-                                .find(|a| a.name == album || a.album_key == album)
-                            {
-                                found.album_key.clone()
-                            } else {
-                                println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'sm albums list' to see available albums");
-                                return Ok(());
-                            }
-                        }
-                        Err(e) => {
-                            println!("\n✗ Failed to list albums: {}", e);
-                            return Ok(());
-                        }
+                    let Some((album_key, image)) =
+                        find_comment_target(&client, &album, image_key.as_deref()).await?
+                    else {
+                        return Ok(());
+                    };
+                    let target = match &image {
+                        Some(image) => api::comments::CommentTarget::Image(&image.image_key),
+                        None => api::comments::CommentTarget::Album(&album_key),
                     };
 
-                    // Verify the image exists in the album
-                    println!("Verifying image exists...");
-                    let image_info = match client.list_album_images(&album_key_resolved).await {
-                        Ok(images) => {
-                            if let Some(found) =
-                                images.iter().find(|img| img.image_key == image_key)
-                            {
-                                found.clone()
-                            } else {
-                                println!("\n✗ Image not found in album: {}", image_key);
-                                println!(
-                                    "  Use 'sm images list {}' to see available images",
-                                    album
-                                );
-                                return Ok(());
-                            }
-                        }
-                        Err(e) => {
-                            println!("\n✗ Failed to list images: {}", e);
-                            return Ok(());
-                        }
-                    };
-
-                    // Show image details and comment preview
-                    println!("\nImage: {}", image_info.file_name);
+                    match &image {
+                        Some(image) => println!("\nImage: {}", image.file_name),
+                        None => println!("\nAlbum: {}", album),
+                    }
                     println!("Comment preview:");
                     println!("  Author: {}", name.as_deref().unwrap_or("Anonymous"));
                     println!("  Text: {}", text);
@@ -1623,19 +1562,16 @@ async fn main() -> Result<()> {
                         println!("  Rating: {}/5", r);
                     }
 
-                    // Confirm
                     use dialoguer::Confirm;
                     let confirmed = Confirm::new()
                         .with_prompt("Post this comment?")
                         .default(true)
                         .interact()?;
-
                     if !confirmed {
                         println!("\nComment cancelled.");
                         return Ok(());
                     }
 
-                    // Create comment
                     println!("\nPosting comment...");
                     let request = api::comments::CreateCommentRequest {
                         text,
@@ -1644,8 +1580,7 @@ async fn main() -> Result<()> {
                         rating,
                         link: None,
                     };
-
-                    match client.create_image_comment(&image_key, request).await {
+                    match client.create_comment(target, request).await {
                         Ok(comment) => {
                             println!("\n✓ Comment posted successfully!");
                             if let Some(key) = comment.comment_key {
@@ -2238,6 +2173,60 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The album (by name or key) and, when `image_key` is given, the image in
+/// it that a comment command is about. `None` after printing why when either
+/// isn't found.
+async fn find_comment_target(
+    client: &api::SmugMugClient,
+    album: &str,
+    image_key: Option<&str>,
+) -> Result<Option<(String, Option<api::images::AlbumImage>)>> {
+    println!("Looking up album: {}", album);
+    let albums = client.list_albums().await?;
+    let Some(found) = albums
+        .iter()
+        .find(|a| a.name == album || a.album_key == album)
+    else {
+        println!("\n✗ Album not found: {}", album);
+        println!("  Use 'sm albums list' to see available albums");
+        return Ok(None);
+    };
+    let album_key = found.album_key.clone();
+    let Some(image_key) = image_key else {
+        return Ok(Some((album_key, None)));
+    };
+    println!("Verifying image exists...");
+    let images = client.list_album_images(&album_key).await?;
+    match images.into_iter().find(|img| img.image_key == image_key) {
+        Some(image) => Ok(Some((album_key, Some(image)))),
+        None => {
+            println!("\n✗ Image not found in album: {}", image_key);
+            println!("  Use 'sm images list {}' to see available images", album);
+            Ok(None)
+        }
+    }
+}
+
+fn print_comment(comment: &api::comments::Comment) {
+    if let Some(key) = &comment.comment_key {
+        println!("  Comment Key: {}", key);
+    }
+    println!(
+        "  Author:      {}",
+        comment.name.as_deref().unwrap_or("Anonymous")
+    );
+    if let Some(rating) = comment.rating {
+        let rating = rating.min(5);
+        let stars = "★".repeat(rating as usize) + &"☆".repeat((5 - rating) as usize);
+        println!("  Rating:      {} ({}/5)", stars, rating);
+    }
+    println!("  Text:        {}", comment.text);
+    if let Some(date) = &comment.date {
+        println!("  Date:        {}", date);
+    }
+    println!();
 }
 
 #[cfg(test)]

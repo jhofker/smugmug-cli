@@ -55,6 +55,7 @@ sm <command>
   - `mod.rs`: Core client with OAuth header building (`build_oauth_header`)
   - `albums.rs`: Album listing, creation, folder path handling
   - `images.rs`: Image metadata fetching
+  - `comments.rs`: image and album comments (`CommentTarget`), the user's `!topkeywords`
   - `upload.rs`: Image upload operations
 - **src/cache/**: Local deduplication using sled embedded database
   - `hash_store.rs`: SHA256 hash storage mapping to uploaded file metadata
@@ -158,7 +159,7 @@ The workers skip any file in the cache, so a file uploaded to album A would neve
 
 ### Adding a New API Endpoint
 1. Add method to `SmugMugClient` in appropriate module (albums, images, upload)
-2. Use `get_with_auth()` or `post_with_auth()` for authenticated requests (they retry 429s and failed connections, GETs also 5xx, honoring `Retry-After`; requests sent with `self.client` directly don't)
+2. Use `get_with_auth()` or `post_with_auth()` for authenticated requests (`get_with_auth` signs a URL's `?query` as parameters; `build_oauth_header` itself panics on a URL with a query in debug builds; they retry 429s and failed connections, GETs also 5xx, honoring `Retry-After`; requests sent with `self.client` directly don't)
 3. Define response structs with serde derives
 4. Add unit tests with mockito
 
