@@ -54,7 +54,7 @@ sm <command>
 - **src/api/**: SmugMug API client with OAuth 1.0a authentication
   - `mod.rs`: Core client with OAuth header building (`build_oauth_header`)
   - `albums.rs`: Album listing, creation, folder path handling
-  - `images.rs`: Image metadata fetching
+  - `images.rs`: Image metadata fetching; `search_images` (`image!search` scoped to the signed-in user) and `recent_images` (`user/<nick>!recentimages`) return `FoundImage`s, read with `get_pages` so `--limit` stops early
   - `upload.rs`: Image upload operations
 - **src/cache/**: Local deduplication using sled embedded database
   - `hash_store.rs`: SHA256 hash storage mapping to uploaded file metadata
@@ -77,6 +77,7 @@ sm <command>
   - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB
   - `jpeg.rs`: finds embedded JPEG previews by walking the file for well-formed JPEG streams (rejects lossless SOF3 streams, which are sensor data in CR2/DNG)
   - `exif.rs`: reads IFD0/EXIF/GPS from TIFF-based RAWs and CR3 `CMT1/2/4` boxes (formats `little_exif` doesn't parse) and writes them into the JPEG with `little_exif`
+- **src/api/taken.rs**: capture times as SmugMug stores them (camera clock read as US Pacific time, see Collecting below); used by `sm images search --taken-from/--taken-to` and to print dates taken
 - **src/config.rs`: Configuration management (TOML file + environment variables)
 
 ### Authentication Flow

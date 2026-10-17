@@ -65,6 +65,92 @@ fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
     }
 }
 
+/// The search `sm images search` asks for. Dates are camera clock times,
+/// which SmugMug stores as if they were US Pacific time (see `api::taken`).
+fn image_search(
+    text: Option<String>,
+    keyword: Option<String>,
+    taken_from: Option<String>,
+    taken_to: Option<String>,
+) -> Result<api::images::ImageSearch> {
+    let start = taken_from
+        .map(|value| api::taken::parse_bound(&value, false))
+        .transpose()?;
+    let end = taken_to
+        .map(|value| api::taken::parse_bound(&value, true))
+        .transpose()?;
+    if let (Some(start), Some(end)) = (start, end)
+        && start > end
+    {
+        anyhow::bail!("--taken-from is after --taken-to");
+    }
+    Ok(api::images::ImageSearch {
+        text,
+        keywords: keyword,
+        // The widest range covering the clock times, for the hours daylight
+        // saving repeats or skips.
+        taken_start: start.map(|t| api::taken::stored_span(t).0),
+        taken_end: end.map(|t| api::taken::stored_span(t).1),
+    })
+}
+
+/// Print images found by a search or the recent list: date taken, file
+/// name, album and web address. Album names are looked up once per album.
+async fn print_found_images(
+    client: &api::SmugMugClient,
+    images: &[api::images::FoundImage],
+    limit: Option<usize>,
+) {
+    if images.is_empty() {
+        println!("No images found.");
+        return;
+    }
+
+    let mut album_names: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for key in images.iter().filter_map(|image| image.album_key()) {
+        if !album_names.contains_key(key) {
+            let name = client.get_album(key).await.ok().map(|album| album.name);
+            album_names.insert(key.to_string(), name);
+        }
+    }
+
+    println!(
+        "{}\n",
+        success(&format!("Found {} images:", format_number(images.len())))
+    );
+    for image in images {
+        let taken = image
+            .taken()
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "(no date taken)".to_string());
+        let name = if image.file_name.is_empty() {
+            &image.image_key
+        } else {
+            &image.file_name
+        };
+        println!("  {}  {}", taken.dimmed(), highlight(name));
+        match image.album_key() {
+            Some(key) => match album_names.get(key).cloned().flatten() {
+                Some(album) => println!("    Album: {} ({})", album, key),
+                None => println!("    Album: {}", key),
+            },
+            None => println!("    Album: (unknown)"),
+        }
+        println!("    Image Key: {}", image.image_key);
+        if let Some(web_uri) = &image.web_uri {
+            println!("    {}", web_uri);
+        }
+        println!();
+    }
+    if limit.is_some_and(|limit| images.len() >= limit) {
+        println!(
+            "{}",
+            info("Showing the first results only; use --limit to see more (0 for all).")
+        );
+    }
+}
+
 /// Where uploads keep their cache (the hash store and file index).
 fn upload_cache_dir() -> Result<std::path::PathBuf> {
     cache::get_cache_path()
@@ -446,6 +532,38 @@ enum ImageCommands {
     List {
         /// Album name or key
         album: String,
+    },
+
+    /// Search your images by text, keyword or date taken
+    Search {
+        /// Words to find in titles, captions, keywords and file names
+        #[arg(long)]
+        text: Option<String>,
+
+        /// Keyword the images are tagged with
+        #[arg(long)]
+        keyword: Option<String>,
+
+        /// Taken on or after this date, by the camera's clock (YYYY-MM-DD,
+        /// optionally followed by HH:MM or HH:MM:SS)
+        #[arg(long, value_name = "DATE")]
+        taken_from: Option<String>,
+
+        /// Taken on or before this date, by the camera's clock (a date alone
+        /// includes the whole day)
+        #[arg(long, value_name = "DATE")]
+        taken_to: Option<String>,
+
+        /// Show at most this many images (0 for all)
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+
+    /// List your most recently uploaded images
+    Recent {
+        /// Show at most this many images (0 for all)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 
     /// Show detailed information about an image
@@ -1058,6 +1176,47 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             println!("\n✗ Failed to list images: {}", e);
+                        }
+                    }
+                }
+                ImageCommands::Search {
+                    text,
+                    keyword,
+                    taken_from,
+                    taken_to,
+                    limit,
+                } => {
+                    let search = image_search(text, keyword, taken_from, taken_to)?;
+                    if search.is_empty() {
+                        println!(
+                            "{}",
+                            error(
+                                "Give at least one of --text, --keyword, --taken-from or --taken-to"
+                            )
+                        );
+                        return Ok(());
+                    }
+                    // Only date filters: show the images in the order they were taken.
+                    let by_date = search.text.is_none() && search.keywords.is_none();
+                    let limit = (limit > 0).then_some(limit);
+                    println!("Searching your images...\n");
+                    match client.search_images(&search, limit).await {
+                        Ok(mut images) => {
+                            if by_date {
+                                images.sort_by_key(|image| image.taken());
+                            }
+                            print_found_images(&client, &images, limit).await;
+                        }
+                        Err(e) => println!("{}", error(&format!("Search failed: {}", e))),
+                    }
+                }
+                ImageCommands::Recent { limit } => {
+                    let limit = (limit > 0).then_some(limit);
+                    println!("Fetching your recent images...\n");
+                    match client.recent_images(limit).await {
+                        Ok(images) => print_found_images(&client, &images, limit).await,
+                        Err(e) => {
+                            println!("{}", error(&format!("Failed to list recent images: {}", e)))
                         }
                     }
                 }
