@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 pub mod album_series;
 pub mod collect;
+pub mod from_url;
 pub mod queue;
 pub mod worker;
 
