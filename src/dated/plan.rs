@@ -282,18 +282,15 @@ impl<T: Smug> Day<T> {
     pub async fn check_name(&self, file_name: &str, md5: &str) -> Result<NameCheck> {
         let names = self.names().await?;
         let mut names = names.lock().unwrap();
-        for candidate in name_candidates(file_name, md5) {
+        let mut first_free = None;
+        for (i, candidate) in name_candidates(file_name, md5).enumerate() {
             match names.get(&candidate) {
                 None => {
-                    names.insert(
-                        candidate.clone(),
-                        NamedImage {
-                            md5: Some(md5.to_string()),
-                            uri: String::new(),
-                            album_key: String::new(),
-                        },
-                    );
-                    return Ok(NameCheck::Upload(candidate));
+                    first_free.get_or_insert(candidate);
+                    // Free under its own name: nothing renamed to look for
+                    if i == 0 {
+                        break;
+                    }
                 }
                 Some(existing)
                     if existing.md5.as_deref() == Some(md5) && !existing.uri.is_empty() =>
@@ -303,10 +300,24 @@ impl<T: Smug> Day<T> {
                 Some(_) => {}
             }
         }
-        anyhow::bail!(
-            "Couldn't find a free name for {} among the day's images",
-            file_name
-        )
+        // Only reached past the file's own name when it's taken, so the
+        // search of every later candidate for the same content (a gap can be
+        // left by an upload that failed and gave its name back) is rare.
+        let Some(candidate) = first_free else {
+            anyhow::bail!(
+                "Couldn't find a free name for {} among the day's images",
+                file_name
+            )
+        };
+        names.insert(
+            candidate.clone(),
+            NamedImage {
+                md5: Some(md5.to_string()),
+                uri: String::new(),
+                album_key: String::new(),
+            },
+        );
+        Ok(NameCheck::Upload(candidate))
     }
 
     /// Record the image a reserved name was uploaded as.
@@ -720,6 +731,42 @@ pub(crate) mod tests {
                 .await
                 .unwrap(),
             NameCheck::Upload("IMG_0001~bbbb2222-3.JPG".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_same_photo_is_found_under_a_later_number_past_a_gap() {
+        let (fake, root) = FakeSmug::with_root();
+        let year = fake.add_folder(&root, "2014");
+        let month = fake.add_folder(&year, "07");
+        // -2 is free (an upload there failed and gave the name back) but the
+        // photo is already there as -3.
+        fake.add_album(
+            &month,
+            "2014-07-12",
+            &[
+                ("IMG_0001.JPG", "aaaa1111"),
+                ("IMG_0001~bbbb2222.JPG", "ffff0000"),
+                ("IMG_0001~bbbb2222-3.JPG", "bbbb2222cccc"),
+            ],
+        );
+        let days = DayAlbums::new(fake.clone(), Some(root), false);
+        let day = days.day(d(2014, 7, 12)).await.unwrap();
+
+        match day
+            .check_name("IMG_0001.JPG", "bbbb2222cccc")
+            .await
+            .unwrap()
+        {
+            NameCheck::Present(image) => assert!(image.uri.ends_with("IMG_0001~bbbb2222-3.JPG")),
+            other => panic!("{:?}", other),
+        }
+        // Other content takes the gap
+        assert_eq!(
+            day.check_name("IMG_0001.JPG", "bbbb2222dddd")
+                .await
+                .unwrap(),
+            NameCheck::Upload("IMG_0001~bbbb2222-2.JPG".into())
         );
     }
 
