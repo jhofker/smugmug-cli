@@ -252,13 +252,85 @@ struct AlbumResponseData {
     album: Album,
 }
 
-#[derive(Debug, Default)]
+/// Album fields to change with `update_album_settings`; `None` leaves a
+/// field as it is. Field names checked against SmugMug's Live API Browser
+/// (2026-10-17).
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct AlbumSettingsUpdate {
     pub privacy: Option<String>,
     pub description: Option<String>,
     pub keywords: Option<String>,
     pub sort_method: Option<String>,
     pub sort_direction: Option<String>,
+    /// Who can view: `None` (anyone the privacy allows), `Password` or
+    /// `GrantAccess`.
+    pub security_type: Option<String>,
+    /// Viewing password, used with `security_type: Password` (max 50 chars).
+    pub password: Option<String>,
+    pub password_hint: Option<String>,
+    pub allow_downloads: Option<bool>,
+    /// Right-click protection.
+    pub protected: Option<bool>,
+    /// Whether visitors can buy prints.
+    pub printable: Option<bool>,
+    /// Whether the album shows share buttons.
+    pub can_share: Option<bool>,
+    /// Watermark images uploaded from now on.
+    pub watermark: Option<bool>,
+    /// The watermark to apply, from `list_watermarks`.
+    pub watermark_uri: Option<String>,
+}
+
+impl AlbumSettingsUpdate {
+    /// The PATCH body: only the fields that are set.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut body = serde_json::Map::new();
+        let mut put = |name: &str, value: serde_json::Value| {
+            body.insert(name.to_string(), value);
+        };
+        let strings = [
+            ("Privacy", &self.privacy),
+            ("Description", &self.description),
+            ("Keywords", &self.keywords),
+            ("SortMethod", &self.sort_method),
+            ("SortDirection", &self.sort_direction),
+            ("SecurityType", &self.security_type),
+            ("Password", &self.password),
+            ("PasswordHint", &self.password_hint),
+            ("WatermarkUri", &self.watermark_uri),
+        ];
+        for (name, value) in strings {
+            if let Some(value) = value {
+                put(name, serde_json::json!(value));
+            }
+        }
+        let flags = [
+            ("AllowDownloads", self.allow_downloads),
+            ("Protected", self.protected),
+            ("Printable", self.printable),
+            ("CanShare", self.can_share),
+            ("Watermark", self.watermark),
+        ];
+        for (name, value) in flags {
+            if let Some(value) = value {
+                put(name, serde_json::json!(value));
+            }
+        }
+        serde_json::Value::Object(body)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A watermark the user has set up, as `user/<nick>!watermarks` lists it.
+#[derive(Debug, Deserialize, Clone)]
+pub struct Watermark {
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "Uri")]
+    pub uri: String,
 }
 
 impl SmugMugClient {
@@ -1169,31 +1241,16 @@ impl SmugMugClient {
         settings: AlbumSettingsUpdate,
     ) -> Result<()> {
         let update_url = format!("https://api.smugmug.com/api/v2/album/{}", album_key);
+        self.update_album_settings_at(&update_url, &settings).await
+    }
 
-        // Build JSON body with only provided fields
-        let mut body = serde_json::json!({});
-
-        if let Some(privacy) = settings.privacy {
-            body["Privacy"] = serde_json::json!(privacy);
-        }
-
-        if let Some(description) = settings.description {
-            body["Description"] = serde_json::json!(description);
-        }
-
-        if let Some(keywords) = settings.keywords {
-            body["Keywords"] = serde_json::json!(keywords);
-        }
-
-        if let Some(sort_method) = settings.sort_method {
-            body["SortMethod"] = serde_json::json!(sort_method);
-        }
-
-        if let Some(sort_direction) = settings.sort_direction {
-            body["SortDirection"] = serde_json::json!(sort_direction);
-        }
-
-        let response = self.patch_with_auth(&update_url, body).await?;
+    async fn update_album_settings_at(
+        &self,
+        update_url: &str,
+        settings: &AlbumSettingsUpdate,
+    ) -> Result<()> {
+        let body = settings.to_json();
+        let response = self.patch_with_auth(update_url, body).await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -1207,6 +1264,15 @@ impl SmugMugClient {
         }
 
         Ok(())
+    }
+
+    /// The signed-in user's watermarks.
+    pub async fn list_watermarks(&self) -> Result<Vec<Watermark>> {
+        let url = format!(
+            "https://api.smugmug.com/api/v2/user/{}!watermarks",
+            self.auth_user().await?.nickname
+        );
+        self.get_all_pages(&url, "Watermark").await
     }
 
     /// Request album download ZIP generation
@@ -1832,6 +1898,7 @@ mod tests {
             keywords: Some("vacation;beach;2024".to_string()),
             sort_method: Some("DateTimeOriginal".to_string()),
             sort_direction: Some("Descending".to_string()),
+            ..Default::default()
         };
 
         assert_eq!(update.privacy, Some("Public".to_string()));
@@ -2045,5 +2112,97 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(album.allow_downloads, Some(false));
+    }
+
+    #[test]
+    fn album_settings_body_has_only_set_fields() {
+        assert!(AlbumSettingsUpdate::default().is_empty());
+        assert_eq!(
+            AlbumSettingsUpdate::default().to_json(),
+            serde_json::json!({})
+        );
+
+        let update = AlbumSettingsUpdate {
+            privacy: Some("Unlisted".into()),
+            security_type: Some("Password".into()),
+            password: Some("hunter2".into()),
+            password_hint: Some("the usual".into()),
+            allow_downloads: Some(false),
+            protected: Some(true),
+            printable: Some(false),
+            can_share: Some(true),
+            watermark: Some(true),
+            watermark_uri: Some("/api/v2/watermark/W1".into()),
+            ..Default::default()
+        };
+        assert!(!update.is_empty());
+        assert_eq!(
+            update.to_json(),
+            serde_json::json!({
+                "Privacy": "Unlisted",
+                "SecurityType": "Password",
+                "Password": "hunter2",
+                "PasswordHint": "the usual",
+                "AllowDownloads": false,
+                "Protected": true,
+                "Printable": false,
+                "CanShare": true,
+                "Watermark": true,
+                "WatermarkUri": "/api/v2/watermark/W1"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn update_album_settings_patches_the_set_fields() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("PATCH", "/api/v2/album/ABC123")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "SecurityType": "None",
+                "AllowDownloads": true
+            })))
+            .with_status(200)
+            .with_body(r#"{"Response":{"Album":{"AlbumKey":"ABC123"}}}"#)
+            .create_async()
+            .await;
+
+        client
+            .update_album_settings_at(
+                &format!("{}/api/v2/album/ABC123", server.url()),
+                &AlbumSettingsUpdate {
+                    security_type: Some("None".into()),
+                    allow_downloads: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn update_album_settings_reports_refusals() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("PATCH", "/api/v2/album/ABC123")
+            .with_status(400)
+            .with_body(r#"{"Code":400,"Message":"Bad Request"}"#)
+            .create_async()
+            .await;
+
+        let error = client
+            .update_album_settings_at(
+                &format!("{}/api/v2/album/ABC123", server.url()),
+                &AlbumSettingsUpdate {
+                    password: Some("x".repeat(51)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("400"));
     }
 }
