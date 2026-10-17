@@ -64,6 +64,7 @@ sm <command>
   - `worker.rs`: Individual upload worker logic with deduplication checks
   - `collect.rs`: adds files the cache knows are in another album to this one instead of skipping them (see Collecting below)
   - `mod.rs`: Main upload coordination, supports both flat and structured uploads
+  - `from_url.rs`: `sm upload --album X --url <url>`: `POST album/<key>!uploadfromuri` with `{"Uri", "FileName"}` (`api::upload::upload_from_uri`), one URL at a time through the album series; no cache or dedupe since the bytes never reach us. The endpoint is owner-only in the Live API Browser (404, not "Route Not Found"), so its response shape is unverified: `uploaded_image_uri` takes any image `Uri` in it
 - **src/dated/**: uploads into albums by capture date, `<root>/YYYY/MM/YYYY-MM-DD` (default `upload` destination and `backup`)
   - `scan.rs`: walks with the `ignore` crate (exclude globs as overrides, `.smugmugignore`, hidden files, NAS dirs pruned), stat only; pairs Live Photo videos with their photo and drops RAWs with a JPEG sibling (`select_raw_files`)
   - `index.rs`: sled tree `files` (path → size, mtime, SHA-256, uploaded MD5, date, image URI) and `refs` (image URI → paths using it), in the hash store's database
