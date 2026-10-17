@@ -133,6 +133,7 @@ SmugMug's Library ("All Media") would be the natural default destination, but it
 The `build_oauth_header()` method in `api/mod.rs` constructs OAuth 1.0a headers. It currently defaults to GET for unknown HTTP methods.
 
 ### Album and Folder Management
+- `AlbumSettingsUpdate` (`api/albums.rs`) is the album PATCH body: set fields only (`to_json`). Field names (`SecurityType` None/Password/GrantAccess, `Password` ≤50 chars, `PasswordHint`, `AllowDownloads`, `Protected`, `Printable`, `CanShare`, `Watermark`, `WatermarkUri`) were checked in SmugMug's Live API Browser; `user/<nick>!watermarks` and share groups are owner-only and weren't
 - Albums are created under a parent node (folder or root)
 - `find_or_create_folder_path()` in `api/albums.rs` handles nested folder creation
 - Node URIs are used to reference locations in the SmugMug hierarchy

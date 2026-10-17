@@ -65,6 +65,97 @@ fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
     }
 }
 
+/// Find an album by name or key, printing why when it can't.
+async fn find_album(client: &api::SmugMugClient, album: &str) -> Option<api::albums::Album> {
+    println!("Looking up album: {}", album);
+    match client.list_albums().await {
+        Ok(albums) => {
+            let found = albums
+                .into_iter()
+                .find(|a| a.name == album || a.album_key == album);
+            if found.is_none() {
+                println!("\n✗ Album not found: {}", album);
+                println!("  Use 'sm albums list' to see available albums");
+            }
+            found
+        }
+        Err(e) => {
+            println!("\n✗ Failed to list albums: {}", e);
+            None
+        }
+    }
+}
+
+/// SmugMug's spelling of a privacy level typed in any case.
+fn parse_privacy(value: &str) -> Result<String> {
+    match value.to_lowercase().as_str() {
+        "public" => Ok("Public".to_string()),
+        "unlisted" => Ok("Unlisted".to_string()),
+        "private" => Ok("Private".to_string()),
+        _ => anyhow::bail!(
+            "Invalid privacy value: {} (valid values: public, unlisted, private)",
+            value
+        ),
+    }
+}
+
+/// The settings an update changes, as label and value, for showing before
+/// it's sent. Passwords are masked.
+fn describe_album_settings(
+    settings: &api::albums::AlbumSettingsUpdate,
+    watermark_name: Option<&str>,
+) -> Vec<(&'static str, String)> {
+    let yes_no = |b: bool| if b { "yes" } else { "no" }.to_string();
+    let mut lines = Vec::new();
+    let mut text = |label, value: &Option<String>| {
+        if let Some(value) = value {
+            lines.push((label, value.clone()));
+        }
+    };
+    text("Privacy", &settings.privacy);
+    text("Description", &settings.description);
+    text("Keywords", &settings.keywords);
+    text("Sort Method", &settings.sort_method);
+    text("Sort Direction", &settings.sort_direction);
+    match settings.security_type.as_deref() {
+        Some("Password") => lines.push(("Password", "set (hidden)".to_string())),
+        Some("None") => lines.push(("Password", "removed".to_string())),
+        Some(other) => lines.push(("Security", other.to_string())),
+        None => {}
+    }
+    if let Some(hint) = &settings.password_hint {
+        lines.push(("Password Hint", hint.clone()));
+    }
+    let flags = [
+        ("Allow Downloads", settings.allow_downloads),
+        ("Right-Click Protection", settings.protected),
+        ("Printable", settings.printable),
+        ("Share Buttons", settings.can_share),
+    ];
+    for (label, value) in flags {
+        if let Some(value) = value {
+            lines.push((label, yes_no(value)));
+        }
+    }
+    match (settings.watermark, &settings.watermark_uri) {
+        (Some(false), _) => lines.push(("Watermark", "none".to_string())),
+        (_, Some(uri)) => lines.push(("Watermark", watermark_name.unwrap_or(uri).to_string())),
+        _ => {}
+    }
+    lines
+}
+
+fn print_watermark_names(watermarks: &[api::albums::Watermark]) {
+    if watermarks.is_empty() {
+        println!("You have no watermarks. Set them up on the SmugMug website first.");
+        return;
+    }
+    println!("Your watermarks:");
+    for watermark in watermarks {
+        println!("  {}", watermark.name);
+    }
+}
+
 /// Where uploads keep their cache (the hash store and file index).
 fn upload_cache_dir() -> Result<std::path::PathBuf> {
     cache::get_cache_path()
@@ -394,7 +485,49 @@ enum AlbumCommands {
         /// Set sort direction (asc, desc)
         #[arg(long)]
         sort_direction: Option<String>,
+
+        /// Require this password to view the album
+        #[arg(long, conflicts_with = "no_password")]
+        password: Option<String>,
+
+        /// Hint shown with the password prompt
+        #[arg(long)]
+        password_hint: Option<String>,
+
+        /// Remove the album's password
+        #[arg(long)]
+        no_password: bool,
+
+        /// Let visitors download photos (true/false)
+        #[arg(long, value_name = "BOOL")]
+        allow_downloads: Option<bool>,
+
+        /// Right-click protection (true/false)
+        #[arg(long, value_name = "BOOL")]
+        protected: Option<bool>,
+
+        /// Let visitors buy prints (true/false)
+        #[arg(long, value_name = "BOOL")]
+        printable: Option<bool>,
+
+        /// Show share buttons (true/false)
+        #[arg(long, value_name = "BOOL")]
+        can_share: Option<bool>,
+
+        /// Watermark new uploads with this watermark (by name), or "none"
+        /// to stop (see `sm albums watermarks`)
+        #[arg(long, value_name = "NAME")]
+        watermark: Option<String>,
     },
+
+    /// Make an album unlisted and print its link, for sharing
+    Share {
+        /// Album name or key
+        album: String,
+    },
+
+    /// List your watermarks
+    Watermarks,
 
     /// Get album download link (ZIP file)
     GetDownloadLink {
@@ -823,58 +956,22 @@ async fn main() -> Result<()> {
                     keywords,
                     sort_method,
                     sort_direction,
+                    password,
+                    password_hint,
+                    no_password,
+                    allow_downloads,
+                    protected,
+                    printable,
+                    can_share,
+                    watermark,
                 } => {
-                    println!("Looking up album: {}", album);
-
-                    // Try to find album by name or use as key
-                    let (album_key, album_info) = match client.list_albums().await {
-                        Ok(albums) => {
-                            if let Some(found) = albums
-                                .iter()
-                                .find(|a| a.name == album || a.album_key == album)
-                            {
-                                (found.album_key.clone(), Some(found.clone()))
-                            } else {
-                                println!("\n✗ Album not found: {}", album);
-                                println!("  Use 'sm albums list' to see available albums");
-                                return Ok(());
-                            }
-                        }
+                    // Validate and normalize privacy value
+                    let privacy = match privacy.map(|p| parse_privacy(&p)).transpose() {
+                        Ok(privacy) => privacy,
                         Err(e) => {
-                            println!("\n✗ Failed to list albums: {}", e);
+                            println!("\n{}", error(&e.to_string()));
                             return Ok(());
                         }
-                    };
-
-                    // Check if any settings were provided
-                    if privacy.is_none()
-                        && description.is_none()
-                        && keywords.is_none()
-                        && sort_method.is_none()
-                        && sort_direction.is_none()
-                    {
-                        println!("\n✗ No settings specified to update");
-                        println!(
-                            "  Use --privacy, --description, --keywords, --sort-method, or --sort-direction"
-                        );
-                        return Ok(());
-                    }
-
-                    // Validate and normalize privacy value
-                    let privacy = if let Some(p) = privacy {
-                        let normalized = match p.to_lowercase().as_str() {
-                            "public" => "Public",
-                            "unlisted" => "Unlisted",
-                            "private" => "Private",
-                            _ => {
-                                println!("\n✗ Invalid privacy value: {}", p);
-                                println!("  Valid values: public, unlisted, private");
-                                return Ok(());
-                            }
-                        };
-                        Some(normalized.to_string())
-                    } else {
-                        None
                     };
 
                     // Validate and normalize sort direction
@@ -893,44 +990,103 @@ async fn main() -> Result<()> {
                         None
                     };
 
-                    // Show current album info
-                    if let Some(info) = album_info {
-                        println!("\nAlbum: {}", info.name);
-                        println!("  Key: {}", info.album_key);
-                        if let Some(web_uri) = &info.web_uri {
-                            println!("  URL: {}", web_uri);
-                        }
+                    if password
+                        .as_ref()
+                        .is_some_and(|p| p.is_empty() || p.chars().count() > 50)
+                    {
+                        println!("\n{}", error("The password must be 1 to 50 characters"));
+                        return Ok(());
                     }
+                    let security_type = if password.is_some() {
+                        Some("Password".to_string())
+                    } else if no_password {
+                        Some("None".to_string())
+                    } else {
+                        None
+                    };
 
-                    // Show what will be updated
-                    println!("\nSettings to update:");
-                    if let Some(ref p) = privacy {
-                        println!("  Privacy: {}", p);
-                    }
-                    if let Some(ref d) = description {
-                        println!("  Description: {}", d);
-                    }
-                    if let Some(ref k) = keywords {
-                        println!("  Keywords: {}", k);
-                    }
-                    if let Some(ref sm) = sort_method {
-                        println!("  Sort Method: {}", sm);
-                    }
-                    if let Some(ref sd) = sort_direction {
-                        println!("  Sort Direction: {}", sd);
-                    }
-
-                    // Create settings update struct
-                    let settings = api::albums::AlbumSettingsUpdate {
+                    let mut settings = api::albums::AlbumSettingsUpdate {
                         privacy,
                         description,
                         keywords,
                         sort_method,
                         sort_direction,
+                        security_type,
+                        password,
+                        password_hint,
+                        allow_downloads,
+                        protected,
+                        printable,
+                        can_share,
+                        ..Default::default()
+                    };
+                    if settings.is_empty() && watermark.is_none() {
+                        println!("\n✗ No settings specified to update");
+                        println!(
+                            "  See 'sm albums settings --help' for the settings you can change"
+                        );
+                        return Ok(());
+                    }
+
+                    let Some(info) = find_album(&client, &album).await else {
+                        return Ok(());
                     };
 
+                    let watermark_name = watermark.clone().unwrap_or_default();
+                    if let Some(name) = watermark {
+                        if name.eq_ignore_ascii_case("none") {
+                            settings.watermark = Some(false);
+                        } else {
+                            match client.list_watermarks().await {
+                                Ok(watermarks) => {
+                                    match watermarks
+                                        .iter()
+                                        .find(|w| w.name.eq_ignore_ascii_case(&name))
+                                    {
+                                        Some(found) => {
+                                            settings.watermark = Some(true);
+                                            settings.watermark_uri = Some(found.uri.clone());
+                                        }
+                                        None => {
+                                            println!(
+                                                "\n{}",
+                                                error(&format!("No watermark named \"{}\"", name))
+                                            );
+                                            print_watermark_names(&watermarks);
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    println!(
+                                        "\n{}",
+                                        error(&format!("Failed to list watermarks: {}", e))
+                                    );
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+
+                    // Show current album info
+                    println!("\nAlbum: {}", info.name);
+                    println!("  Key: {}", info.album_key);
+                    if let Some(web_uri) = &info.web_uri {
+                        println!("  URL: {}", web_uri);
+                    }
+
+                    // Show what will be updated
+                    println!("\nSettings to update:");
+                    for (label, value) in describe_album_settings(&settings, Some(&watermark_name))
+                    {
+                        println!("  {}: {}", label, value);
+                    }
+
                     println!("\nUpdating album settings...");
-                    match client.update_album_settings(&album_key, settings).await {
+                    match client
+                        .update_album_settings(&info.album_key, settings)
+                        .await
+                    {
                         Ok(()) => {
                             println!("\n✓ Album settings updated successfully!");
                         }
@@ -939,6 +1095,43 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                AlbumCommands::Share { album } => {
+                    let Some(info) = find_album(&client, &album).await else {
+                        return Ok(());
+                    };
+                    let settings = api::albums::AlbumSettingsUpdate {
+                        privacy: Some("Unlisted".to_string()),
+                        ..Default::default()
+                    };
+                    if let Err(e) = client
+                        .update_album_settings(&info.album_key, settings)
+                        .await
+                    {
+                        println!(
+                            "\n{}",
+                            error(&format!("Failed to make the album unlisted: {}", e))
+                        );
+                        return Ok(());
+                    }
+                    println!(
+                        "\n{}",
+                        success(&format!(
+                            "{} is unlisted: anyone with the link can view it, but it isn't listed on your site or in search",
+                            info.name
+                        ))
+                    );
+                    match &info.web_uri {
+                        Some(web_uri) => println!("\n  {}", highlight(web_uri)),
+                        None => println!(
+                            "\n  {}",
+                            warning("SmugMug didn't return a link for this album")
+                        ),
+                    }
+                }
+                AlbumCommands::Watermarks => match client.list_watermarks().await {
+                    Ok(watermarks) => print_watermark_names(&watermarks),
+                    Err(e) => println!("{}", error(&format!("Failed to list watermarks: {}", e))),
+                },
                 AlbumCommands::GetDownloadLink { album, wait } => {
                     println!("Looking up album: {}", album);
 
@@ -2336,5 +2529,47 @@ mod tests {
         assert_eq!(format_duration(3661), "1h 1m 1s");
         assert_eq!(format_duration(7200), "2h 0m 0s");
         assert_eq!(format_duration(7265), "2h 1m 5s");
+    }
+
+    #[test]
+    fn test_parse_privacy() {
+        assert_eq!(parse_privacy("UNLISTED").unwrap(), "Unlisted");
+        assert_eq!(parse_privacy("public").unwrap(), "Public");
+        assert!(parse_privacy("secret").is_err());
+    }
+
+    #[test]
+    fn test_describe_album_settings_hides_the_password() {
+        let settings = api::albums::AlbumSettingsUpdate {
+            security_type: Some("Password".into()),
+            password: Some("hunter2".into()),
+            allow_downloads: Some(false),
+            watermark: Some(true),
+            watermark_uri: Some("/api/v2/watermark/W1".into()),
+            ..Default::default()
+        };
+        let lines = describe_album_settings(&settings, Some("Logo"));
+        assert_eq!(
+            lines,
+            vec![
+                ("Password", "set (hidden)".to_string()),
+                ("Allow Downloads", "no".to_string()),
+                ("Watermark", "Logo".to_string()),
+            ]
+        );
+        assert!(!format!("{:?}", lines).contains("hunter2"));
+
+        let off = api::albums::AlbumSettingsUpdate {
+            security_type: Some("None".into()),
+            watermark: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            describe_album_settings(&off, None),
+            vec![
+                ("Password", "removed".to_string()),
+                ("Watermark", "none".to_string()),
+            ]
+        );
     }
 }

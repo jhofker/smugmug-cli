@@ -348,6 +348,15 @@ sm sort Backup --folders-by name --recursive
   - `--keywords <KEYWORDS>` - Set keywords (semicolon-separated)
   - `--sort-method <METHOD>` - Set sort method (Position, Caption, FileName, DateTimeOriginal, DateTimeUploaded)
   - `--sort-direction <DIR>` - Set sort direction (asc, desc)
+  - `--password <PASSWORD>` / `--password-hint <HINT>` - Require a password to view the album (up to 50 characters)
+  - `--no-password` - Remove the album's password
+  - `--allow-downloads <BOOL>` - Let visitors download photos (true/false)
+  - `--protected <BOOL>` - Right-click protection
+  - `--printable <BOOL>` - Let visitors buy prints
+  - `--can-share <BOOL>` - Show share buttons
+  - `--watermark <NAME>` - Watermark new uploads with one of your watermarks, or `none` to stop
+- `sm albums share <ALBUM>` - Make an album unlisted (viewable by anyone with the link) and print its link
+- `sm albums watermarks` - List your watermarks
 - `sm albums get-download-link <ALBUM>` - Get album download link (ZIP file)
   - `--wait` - Wait for download generation (polls until ready)
 
