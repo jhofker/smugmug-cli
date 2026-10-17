@@ -170,6 +170,7 @@ fn placeholder_album(name: &str) -> Album {
         web_uri: None,
         uris: None,
         image_count: Some(0),
+        allow_downloads: None,
     }
 }
 

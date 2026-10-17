@@ -334,6 +334,7 @@ sm sort Backup --folders-by name --recursive
 ### Albums
 
 - `sm albums list` - List all albums
+  - `--user <NICKNAME>` - Another user's public albums instead (works with `tree` and `download` too)
 - `sm albums create <NAME>` - Create a new album (private by default)
   - `--privacy <LEVEL>` - Set privacy level (private, unlisted, public) - defaults to private
 - `sm albums delete <ALBUM>` - Delete an album

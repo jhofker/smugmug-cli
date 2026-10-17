@@ -81,6 +81,14 @@ pub struct Album {
         skip_serializing_if = "Option::is_none"
     )]
     pub image_count: Option<u64>,
+    /// Whether visitors may download originals (always true for your own
+    /// albums, through the API).
+    #[serde(
+        rename = "AllowDownloads",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_downloads: Option<bool>,
 }
 
 /// One child of a folder node, as `!children` lists it.
@@ -138,6 +146,7 @@ impl ChildNode {
             web_uri: self.web_uri.clone(),
             uris: None,
             image_count: None,
+            allow_downloads: None,
         })
     }
 }
@@ -183,8 +192,6 @@ struct UserResponseData {
 
 #[derive(Debug, Deserialize)]
 struct UserInfo {
-    #[serde(rename = "Uri")]
-    uri: String,
     #[serde(rename = "NickName")]
     nickname: String,
     #[serde(rename = "Uris")]
@@ -256,34 +263,17 @@ pub struct AlbumSettingsUpdate {
 
 impl SmugMugClient {
     pub async fn list_albums(&self) -> Result<Vec<Album>> {
-        // First get the authenticated user info
-        let auth_user_url = "https://api.smugmug.com/api/v2!authuser";
-        let oauth_header = self.build_oauth_header("GET", auth_user_url);
+        self.list_user_albums(None).await
+    }
 
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self
-            .client
-            .get(auth_user_url)
-            .headers(headers.clone())
-            .send()
-            .await?;
-
-        let status = response.status();
-        let body_text = response.text().await?;
-
-        if !status.is_success() {
-            anyhow::bail!("Failed to get auth user: {} - {}", status, body_text);
-        }
-
-        let user_data: UserResponse = serde_json::from_str(&body_text)?;
-        let user_uri = user_data.response.user.uri;
-        let user_nickname = user_data.response.user.nickname;
-
-        // Now get all of this user's albums, across every page of the listing
-        let albums_url = format!("https://api.smugmug.com{}!albums", user_uri);
+    /// Every album of `nickname` (the signed-in user if `None`). For other
+    /// users that's the albums the API shows visitors.
+    pub async fn list_user_albums(&self, nickname: Option<&str>) -> Result<Vec<Album>> {
+        let nickname = match nickname {
+            Some(nickname) => nickname.to_string(),
+            None => self.auth_user().await?.nickname,
+        };
+        let albums_url = format!("https://api.smugmug.com/api/v2/user/{}!albums", nickname);
         let mut albums: Vec<Album> = self
             .get_all_pages(&albums_url, "Album")
             .await
@@ -294,12 +284,40 @@ impl SmugMugClient {
             if album.web_uri.is_none() {
                 album.web_uri = Some(format!(
                     "https://{}.smugmug.com/{}",
-                    user_nickname, album.url_name
+                    nickname, album.url_name
                 ));
             }
         }
 
         Ok(albums)
+    }
+
+    /// `nickname`'s nickname and root node; the signed-in user if `None`.
+    pub async fn user(&self, nickname: Option<&str>) -> Result<super::AuthUser> {
+        match nickname {
+            None => self.auth_user().await,
+            Some(nickname) => {
+                self.user_at(&format!("https://api.smugmug.com/api/v2/user/{}", nickname))
+                    .await
+            }
+        }
+    }
+
+    async fn user_at(&self, url: &str) -> Result<super::AuthUser> {
+        let response = self.get_with_auth(url).await?;
+        let status = response.status();
+        let body_text = response.text().await?;
+        if status == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("No such SmugMug user (or their site isn't public)");
+        }
+        if !status.is_success() {
+            anyhow::bail!("Failed to get user: {} - {}", status, body_text);
+        }
+        let user_data: UserResponse = serde_json::from_str(&body_text)?;
+        Ok(super::AuthUser {
+            nickname: user_data.response.user.nickname,
+            root_node_uri: user_data.response.user.uris.node.uri,
+        })
     }
 
     /// The signed-in user's nickname and root node, fetched on first use.
@@ -769,6 +787,7 @@ impl SmugMugClient {
                             web_uri: Some(node.web_uri.clone()),
                             uris: None,
                             image_count: None,
+                            allow_downloads: None,
                         };
 
                         return Ok(Some(album));
@@ -982,27 +1001,9 @@ impl SmugMugClient {
         Ok(())
     }
 
-    pub async fn get_node_tree(&self) -> Result<super::NodeTree> {
-        // Get the authenticated user's root node
-        let auth_user_url = "https://api.smugmug.com/api/v2!authuser";
-        let oauth_header = self.build_oauth_header("GET", auth_user_url);
-
-        let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
-        headers.insert("Accept", HeaderValue::from_static("application/json"));
-
-        let response = self
-            .client
-            .get(auth_user_url)
-            .headers(headers)
-            .send()
-            .await?;
-
-        let body_text = response.text().await?;
-        let user_data: UserResponse = serde_json::from_str(&body_text)?;
-        let root_node_uri = user_data.response.user.uris.node.uri;
-
-        // Fetch the root node and build tree
+    /// The folder/album tree of `nickname` (the signed-in user if `None`).
+    pub async fn get_user_node_tree(&self, nickname: Option<&str>) -> Result<super::NodeTree> {
+        let root_node_uri = self.user(nickname).await?.root_node_uri;
         self.fetch_node_tree(&root_node_uri).await
     }
 
@@ -1385,6 +1386,7 @@ mod tests {
             web_uri: Some("https://user.smugmug.com/test-album".to_string()),
             uris: None,
             image_count: None,
+            allow_downloads: None,
         };
 
         let json = serde_json::to_string(&album).unwrap();
@@ -1718,6 +1720,7 @@ mod tests {
             web_uri: Some("https://user.smugmug.com/test-album".to_string()),
             uris: None,
             image_count: None,
+            allow_downloads: None,
         };
 
         let cloned = album.clone();
@@ -1998,5 +2001,49 @@ mod tests {
                 "SortDirection": "Ascending"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn another_users_root_node_comes_from_their_user_record() {
+        let mut server = mockito::Server::new_async().await;
+        let _found = server
+            .mock("GET", "/api/v2/user/cmac")
+            .with_status(200)
+            .with_body(
+                r#"{"Response": {"User": {"NickName": "cmac", "Uri": "/api/v2/user/cmac",
+                    "Uris": {"Node": {"Uri": "/api/v2/node/zx4Fx"}}}}}"#,
+            )
+            .create_async()
+            .await;
+        let _missing = server
+            .mock("GET", "/api/v2/user/nobody")
+            .with_status(404)
+            .with_body(r#"{"Code": 404, "Message": "Not Found"}"#)
+            .create_async()
+            .await;
+        let client = create_test_client();
+
+        let user = client
+            .user_at(&format!("{}/api/v2/user/cmac", server.url()))
+            .await
+            .unwrap();
+        assert_eq!(user.nickname, "cmac");
+        assert_eq!(user.root_node_uri, "/api/v2/node/zx4Fx");
+
+        let err = client
+            .user_at(&format!("{}/api/v2/user/nobody", server.url()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("No such SmugMug user"));
+    }
+
+    #[test]
+    fn albums_say_whether_downloads_are_allowed() {
+        let album: Album = serde_json::from_value(serde_json::json!({
+            "AlbumKey": "BgCgwq", "Name": "Israel 1990", "UrlName": "Israel-1990",
+            "NodeID": "GC4h2C", "Uri": "/api/v2/album/BgCgwq", "AllowDownloads": false
+        }))
+        .unwrap();
+        assert_eq!(album.allow_downloads, Some(false));
     }
 }
