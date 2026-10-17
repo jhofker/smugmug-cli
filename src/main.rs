@@ -65,6 +65,109 @@ fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
     }
 }
 
+/// Where `--album` looks for and creates its album series: in the
+/// `--parent` folder (found or created; a dry run only looks), or anywhere
+/// in the account. A `--parent` folder keeps SmugMug's default privacy, as
+/// before. `None` (after printing why) when the folder can't be had.
+async fn album_scope(
+    client: &api::SmugMugClient,
+    folder_path: Option<&str>,
+    dry_run: bool,
+) -> Option<uploader::album_series::AlbumScope> {
+    use uploader::album_series::AlbumScope;
+    let Some(folder) = folder_path else {
+        return Some(AlbumScope::Anywhere);
+    };
+    println!("Finding/creating folder path: {}", folder);
+    let privacy = None;
+    let found = if dry_run {
+        client.find_folder_path(folder).await
+    } else {
+        client
+            .find_or_create_folder_path(folder, privacy)
+            .await
+            .map(Some)
+    };
+    match found {
+        Ok(Some(uri)) => {
+            println!("✓ Using folder: {}\n", folder);
+            Some(AlbumScope::Folder(uri))
+        }
+        Ok(None) => {
+            println!("• Would create folder: {}\n", folder);
+            Some(AlbumScope::MissingFolder)
+        }
+        Err(e) => {
+            println!("✗ Failed to find/create folder path: {}", e);
+            None
+        }
+    }
+}
+
+/// `sm upload --url`: SmugMug fetches each URL into the album series.
+async fn upload_urls(
+    client: std::sync::Arc<api::SmugMugClient>,
+    urls: &[String],
+    album_name: &str,
+    folder_path: Option<String>,
+    dry_run: bool,
+) -> Result<()> {
+    use uploader::album_series::{AlbumSeries, ClientAlbumSeries, MAX_ALBUM_IMAGES};
+    use uploader::from_url;
+
+    for url in urls {
+        from_url::check_url(url)?;
+    }
+    match &folder_path {
+        Some(folder) => println!("Album: {}/{}", folder, album_name),
+        None => println!("Album: {}", album_name),
+    }
+    if dry_run {
+        println!("DRY RUN - nothing will be uploaded\n");
+    }
+
+    let Some(scope) = album_scope(&client, folder_path.as_deref(), dry_run).await else {
+        return Ok(());
+    };
+    let series = AlbumSeries::load(
+        ClientAlbumSeries::new(client.clone(), scope),
+        album_name,
+        MAX_ALBUM_IMAGES,
+        dry_run,
+    )
+    .await?;
+
+    let outcomes = from_url::upload_urls(&series, &*client, urls, dry_run).await;
+    let mut failed = 0;
+    for outcome in &outcomes {
+        let album = outcome.album.as_deref().unwrap_or("?");
+        match &outcome.result {
+            Ok(_) if dry_run => println!("• Would send {} to {}", outcome.url, album),
+            Ok(Some(uri)) => println!(
+                "{}",
+                success(&format!("Sent {} to {} ({})", outcome.url, album, uri))
+            ),
+            Ok(None) => println!("{}", success(&format!("Sent {} to {}", outcome.url, album))),
+            Err(e) => {
+                failed += 1;
+                println!("{}", error(&format!("{}: {}", outcome.url, e)));
+            }
+        }
+    }
+    if !dry_run && failed < outcomes.len() {
+        println!(
+            "\n{}",
+            info(
+                "SmugMug fetches the files itself; they can take a moment to appear in the album."
+            )
+        );
+    }
+    if failed > 0 {
+        anyhow::bail!("{} of {} URLs failed", failed, outcomes.len());
+    }
+    Ok(())
+}
+
 /// Where uploads keep their cache (the hash store and file index).
 fn upload_cache_dir() -> Result<std::path::PathBuf> {
     cache::get_cache_path()
@@ -170,7 +273,20 @@ enum Commands {
     /// Upload photos to SmugMug
     Upload {
         /// Path to photos directory or file
-        path: String,
+        #[arg(required_unless_present = "urls")]
+        path: Option<String>,
+
+        /// Have SmugMug fetch a photo or video from this public URL into
+        /// --album instead of uploading local files (repeatable). The file
+        /// never passes through this machine, so the local cache can't
+        /// skip duplicates
+        #[arg(
+            long = "url",
+            value_name = "URL",
+            requires = "album",
+            conflicts_with_all = ["path", "structure", "interactive", "excludes", "check_remote"]
+        )]
+        urls: Vec<String>,
 
         /// Number of concurrent upload threads
         #[arg(short, long, default_value = "4")]
@@ -1771,6 +1887,7 @@ async fn main() -> Result<()> {
         }
         Commands::Upload {
             path,
+            urls,
             threads,
             album,
             parent,
@@ -1790,6 +1907,14 @@ async fn main() -> Result<()> {
                 cfg.auth.access_token,
                 cfg.auth.access_token_secret,
             ));
+
+            if !urls.is_empty() {
+                let album_name = album.expect("clap requires --album with --url");
+                return upload_urls(client, &urls, &album_name, parent, dry_run).await;
+            }
+            let Some(path) = path else {
+                anyhow::bail!("Give a path to upload, or --url");
+            };
 
             // With no album, folder or mode given, upload into albums by the
             // day each file was taken, in the default folder.
@@ -1900,7 +2025,7 @@ async fn main() -> Result<()> {
             match upload_mode {
                 UploadMode::SingleAlbum => {
                     use uploader::album_series::{
-                        AlbumScope, AlbumSeries, ClientAlbumSeries, MAX_ALBUM_IMAGES,
+                        AlbumSeries, ClientAlbumSeries, MAX_ALBUM_IMAGES,
                     };
 
                     // Work out what will actually be uploaded before touching
@@ -1926,36 +2051,10 @@ async fn main() -> Result<()> {
                     }
 
                     // Find or create the folder the albums live in (a dry run
-                    // only looks). The default folder is created private; a
-                    // --parent folder keeps SmugMug's default privacy, as
-                    // before.
-                    let scope = if let Some(ref folder) = folder_path {
-                        println!("Finding/creating folder path: {}", folder);
-                        let privacy = None;
-                        let found = if dry_run {
-                            client.find_folder_path(folder).await
-                        } else {
-                            client
-                                .find_or_create_folder_path(folder, privacy)
-                                .await
-                                .map(Some)
-                        };
-                        match found {
-                            Ok(Some(uri)) => {
-                                println!("✓ Using folder: {}\n", folder);
-                                AlbumScope::Folder(uri)
-                            }
-                            Ok(None) => {
-                                println!("• Would create folder: {}\n", folder);
-                                AlbumScope::MissingFolder
-                            }
-                            Err(e) => {
-                                println!("✗ Failed to find/create folder path: {}", e);
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        AlbumScope::Anywhere
+                    // only looks).
+                    let Some(scope) = album_scope(&client, folder_path.as_deref(), dry_run).await
+                    else {
+                        return Ok(());
                     };
 
                     // The album and any overflow albums ("Name (2)", ...) are
