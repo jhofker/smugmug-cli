@@ -7,6 +7,7 @@ pub mod albums;
 pub mod comments;
 pub mod images;
 pub mod oauth_flow;
+pub mod profile;
 pub mod taken;
 pub mod upload;
 

@@ -414,6 +414,13 @@ Folders and albums are given as paths of names from the top of your account, e.g
 - `sm images keywords` - Your most used keywords, most used first
   - `--count <N>` - How many (1 to 2000)
 
+### Profile
+
+- `sm profile show` - Your profile: names, email, bio, links, bio and cover image
+- `sm profile set [OPTIONS]` - Change it (`""` clears a field)
+  - `--bio <TEXT>`, `--display-name <NAME>`, `--first-name <NAME>`, `--last-name <NAME>`, `--email <EMAIL>`
+  - `--link <SITE=URL>` - A social or web link (`facebook`, `instagram`, `twitter`, `pinterest`, `tumblr`, `flickr`, `500px`, `linkedin`, `vimeo`, `youtube`, `wordpress`, `blogger`, `custom`); repeatable
+
 ### Comments
 
 - `sm comments list <ALBUM> [IMAGE_KEY]` - List comments on an album, or on one of its images

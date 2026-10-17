@@ -449,6 +449,12 @@ enum Commands {
         command: ImageCommands,
     },
 
+    /// Your public profile: bio, names, links
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommands,
+    },
+
     /// Comment management
     Comments {
         #[command(subcommand)]
@@ -870,6 +876,39 @@ enum DebugCommands {
         /// Value for the Filepath field (defaults to the file name)
         #[arg(long)]
         filepath: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfileCommands {
+    /// Show your profile
+    Show,
+
+    /// Change your profile. An empty value ("") clears a field
+    Set {
+        /// Biography text
+        #[arg(long)]
+        bio: Option<String>,
+
+        /// Name shown on your site
+        #[arg(long)]
+        display_name: Option<String>,
+
+        #[arg(long)]
+        first_name: Option<String>,
+
+        #[arg(long)]
+        last_name: Option<String>,
+
+        /// Public contact email
+        #[arg(long)]
+        email: Option<String>,
+
+        /// A social or web link as SITE=URL (facebook, instagram, twitter,
+        /// pinterest, tumblr, flickr, 500px, linkedin, vimeo, youtube,
+        /// wordpress, blogger, custom). Repeatable
+        #[arg(long = "link", value_name = "SITE=URL")]
+        links: Vec<String>,
     },
 }
 
@@ -2222,6 +2261,73 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Profile { command } => {
+            let cfg = config::load_config()?;
+            let client = api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            );
+            match command {
+                ProfileCommands::Show => {
+                    use api::profile::ProfileImageKind;
+                    let profile = client.get_profile().await?;
+                    let show = |label: &str, field: &str| {
+                        if let Some(value) = profile.text(field) {
+                            println!("{:<14}{}", format!("{}:", label), value);
+                        }
+                    };
+                    show("Display name", "DisplayName");
+                    show("First name", "FirstName");
+                    show("Last name", "LastName");
+                    show("Email", "ContactEmail");
+                    show("Bio", "BioText");
+                    for (name, field) in api::profile::LINKS {
+                        show(name, field);
+                    }
+                    for (label, kind) in [
+                        ("Bio image", ProfileImageKind::Bio),
+                        ("Cover image", ProfileImageKind::Cover),
+                    ] {
+                        if let Some(image) = client.profile_image(kind).await? {
+                            println!(
+                                "{:<14}{} ({})",
+                                format!("{}:", label),
+                                image.file_name,
+                                image.image_key
+                            );
+                        }
+                    }
+                }
+                ProfileCommands::Set {
+                    bio,
+                    display_name,
+                    first_name,
+                    last_name,
+                    email,
+                    links,
+                } => {
+                    let links = links
+                        .iter()
+                        .map(|link| parse_profile_link(link))
+                        .collect::<Result<Vec<_>>>()?;
+                    let update = api::profile::ProfileUpdate {
+                        bio,
+                        display_name,
+                        first_name,
+                        last_name,
+                        contact_email: email,
+                        links,
+                    };
+                    if update.is_empty() {
+                        anyhow::bail!("Nothing to change: give --bio, --display-name, --link, ...");
+                    }
+                    client.update_profile(&update).await?;
+                    println!("{}", success("Profile updated"));
+                }
+            }
+        }
         Commands::Comments { command } => {
             let cfg = config::load_config()?;
             let client = api::SmugMugClient::new(
@@ -2998,6 +3104,25 @@ fn print_comment(comment: &api::comments::Comment) {
     println!();
 }
 
+/// A `--link SITE=URL` value as (SmugMug field, URL).
+fn parse_profile_link(link: &str) -> Result<(&'static str, String)> {
+    let (site, url) = link
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("--link takes SITE=URL, got '{}'", link))?;
+    let field = api::profile::link_field(site.trim()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Unknown site '{}'. Sites: {}",
+            site,
+            api::profile::LINKS
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    Ok((field, url.trim().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3136,5 +3261,19 @@ mod tests {
                 ("Watermark", "none".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn profile_links_are_site_equals_url() {
+        assert_eq!(
+            parse_profile_link("Instagram=https://instagram.com/me").unwrap(),
+            ("Instagram", "https://instagram.com/me".to_string())
+        );
+        assert_eq!(
+            parse_profile_link("twitter=").unwrap(),
+            ("Twitter", String::new())
+        );
+        assert!(parse_profile_link("instagram").is_err());
+        assert!(parse_profile_link("myspace=https://myspace.com/me").is_err());
     }
 }
