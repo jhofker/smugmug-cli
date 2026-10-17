@@ -331,7 +331,12 @@ enum Commands {
 #[derive(Subcommand)]
 enum AlbumCommands {
     /// List all albums
-    List,
+    List {
+        /// Another user's public albums (their nickname, as in
+        /// NICKNAME.smugmug.com)
+        #[arg(short, long, value_name = "NICKNAME")]
+        user: Option<String>,
+    },
 
     /// Create a new album
     Create {
@@ -365,10 +370,18 @@ enum AlbumCommands {
         /// Number of concurrent download threads
         #[arg(short, long, default_value = "4")]
         threads: usize,
+
+        /// Download another user's public album (their nickname)
+        #[arg(short, long, value_name = "NICKNAME")]
+        user: Option<String>,
     },
 
     /// Show folder/album tree structure
-    Tree,
+    Tree {
+        /// Another user's public folders and albums (their nickname)
+        #[arg(short, long, value_name = "NICKNAME")]
+        user: Option<String>,
+    },
 
     /// Update album settings
     Settings {
@@ -639,9 +652,9 @@ async fn main() -> Result<()> {
             ));
 
             match command {
-                AlbumCommands::List => {
+                AlbumCommands::List { user } => {
                     println!("Fetching albums...");
-                    match client.list_albums().await {
+                    match client.list_user_albums(user.as_deref()).await {
                         Ok(albums) => {
                             println!("\n✓ Found {} albums:\n", albums.len());
                             for album in albums {
@@ -758,18 +771,26 @@ async fn main() -> Result<()> {
                     album,
                     output,
                     threads,
+                    user,
                 } => {
                     println!("Downloading album: {}", album);
                     println!("Output directory: {}", output);
                     println!("Threads: {}\n", threads);
 
                     // Try to find album by name or use as key
-                    let album_key = match client.list_albums().await {
+                    let album_key = match client.list_user_albums(user.as_deref()).await {
                         Ok(albums) => {
                             if let Some(found) = albums
                                 .iter()
                                 .find(|a| a.name == album || a.album_key == album)
                             {
+                                if found.allow_downloads == Some(false) {
+                                    println!(
+                                        "✗ {} doesn't allow downloads from this album",
+                                        user.as_deref().unwrap_or("Its owner")
+                                    );
+                                    return Ok(());
+                                }
                                 found.album_key.clone()
                             } else {
                                 println!("✗ Album not found: {}", album);
@@ -805,9 +826,9 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                AlbumCommands::Tree => {
+                AlbumCommands::Tree { user } => {
                     println!("Fetching folder structure...\n");
-                    match client.get_node_tree().await {
+                    match client.get_user_node_tree(user.as_deref()).await {
                         Ok(tree) => {
                             print_tree(&tree, "", true);
                         }

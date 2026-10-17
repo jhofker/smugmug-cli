@@ -523,6 +523,7 @@ pub(crate) mod tests {
                 web_uri: None,
                 uris: None,
                 image_count: None,
+                allow_downloads: None,
             }
         }
 
