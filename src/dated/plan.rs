@@ -222,13 +222,30 @@ pub struct Day<T> {
     names: OnceCell<std::sync::Mutex<HashMap<String, NamedImage>>>,
 }
 
-/// `IMG_0001.JPG` → `IMG_0001~1a2b3c4d.JPG`.
-pub fn renamed(file_name: &str, md5: &str) -> String {
-    let tag = &md5[..md5.len().min(8)];
+/// `IMG_0001.JPG`, `1a2b3c4d` → `IMG_0001~1a2b3c4d.JPG`.
+fn tagged(file_name: &str, tag: &str) -> String {
     match file_name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => format!("{}~{}.{}", stem, tag, ext),
         _ => format!("{}~{}", file_name, tag),
     }
+}
+
+/// Most names tried for one file: its own, the md5-tagged one, then the
+/// tagged one numbered `-2`, `-3`, ...
+const MAX_NAME_CANDIDATES: usize = 1000;
+
+/// The names to try for a file called `file_name` with content `md5`, in
+/// order: its own, tagged with the start of its md5 (so two cameras' same
+/// `IMG_0001.JPG` stay apart), then numbered for the rare case where even
+/// that is taken by something else.
+fn name_candidates(file_name: &str, md5: &str) -> impl Iterator<Item = String> {
+    let tag = md5[..md5.len().min(8)].to_string();
+    let first = file_name.to_string();
+    let second = tagged(file_name, &tag);
+    let file_name = file_name.to_string();
+    std::iter::once(first)
+        .chain(std::iter::once(second))
+        .chain((2..MAX_NAME_CANDIDATES).map(move |n| tagged(&file_name, &format!("{}-{}", tag, n))))
 }
 
 impl<T: Smug> Day<T> {
@@ -259,23 +276,24 @@ impl<T: Smug> Day<T> {
     }
 
     /// Decide the name for a file called `file_name` with content `md5`,
-    /// reserving it (see `NameCheck`).
+    /// reserving it (see `NameCheck`). The same content under any of its
+    /// candidate names is already there; a name held by other content (or
+    /// reserved by an upload still going) is skipped for the next.
     pub async fn check_name(&self, file_name: &str, md5: &str) -> Result<NameCheck> {
         let names = self.names().await?;
         let mut names = names.lock().unwrap();
-        let alternative = renamed(file_name, md5);
-        for candidate in [file_name, alternative.as_str()] {
-            match names.get(candidate) {
+        for candidate in name_candidates(file_name, md5) {
+            match names.get(&candidate) {
                 None => {
                     names.insert(
-                        candidate.to_string(),
+                        candidate.clone(),
                         NamedImage {
                             md5: Some(md5.to_string()),
                             uri: String::new(),
                             album_key: String::new(),
                         },
                     );
-                    return Ok(NameCheck::Upload(candidate.to_string()));
+                    return Ok(NameCheck::Upload(candidate));
                 }
                 Some(existing)
                     if existing.md5.as_deref() == Some(md5) && !existing.uri.is_empty() =>
@@ -285,23 +303,10 @@ impl<T: Smug> Day<T> {
                 Some(_) => {}
             }
         }
-        // Both taken by other content: extremely unlikely, but stay safe.
-        let mut n = 2;
-        loop {
-            let candidate = renamed(file_name, &format!("{}-{}", md5, n));
-            if !names.contains_key(&candidate) {
-                names.insert(
-                    candidate.clone(),
-                    NamedImage {
-                        md5: Some(md5.to_string()),
-                        uri: String::new(),
-                        album_key: String::new(),
-                    },
-                );
-                return Ok(NameCheck::Upload(candidate));
-            }
-            n += 1;
-        }
+        anyhow::bail!(
+            "Couldn't find a free name for {} among the day's images",
+            file_name
+        )
     }
 
     /// Record the image a reserved name was uploaded as.
@@ -686,13 +691,65 @@ pub(crate) mod tests {
         assert_eq!(fake.calls("album_images"), 1);
     }
 
-    #[test]
-    fn renaming() {
-        assert_eq!(
-            renamed("IMG_0001.JPG", "0123456789"),
-            "IMG_0001~01234567.JPG"
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_photo_whose_two_names_are_both_taken_gets_a_third() {
+        let (fake, root) = FakeSmug::with_root();
+        let year = fake.add_folder(&root, "2014");
+        let month = fake.add_folder(&year, "07");
+        // The plain name and the md5-tagged name are each held by other photos
+        fake.add_album(
+            &month,
+            "2014-07-12",
+            &[
+                ("IMG_0001.JPG", "aaaa1111"),
+                ("IMG_0001~bbbb2222.JPG", "ffff0000"),
+            ],
         );
-        assert_eq!(renamed("noext", "0123456789"), "noext~01234567");
-        assert_eq!(renamed(".hidden", "ab"), ".hidden~ab");
+        let days = DayAlbums::new(fake.clone(), Some(root), false);
+        let day = days.day(d(2014, 7, 12)).await.unwrap();
+
+        assert_eq!(
+            day.check_name("IMG_0001.JPG", "bbbb2222cccc")
+                .await
+                .unwrap(),
+            NameCheck::Upload("IMG_0001~bbbb2222-2.JPG".into())
+        );
+        // And the next one after that
+        assert_eq!(
+            day.check_name("IMG_0001.JPG", "bbbb2222dddd")
+                .await
+                .unwrap(),
+            NameCheck::Upload("IMG_0001~bbbb2222-3.JPG".into())
+        );
+    }
+
+    #[test]
+    fn candidate_names() {
+        let names: Vec<String> = name_candidates("IMG_0001.JPG", "0123456789")
+            .take(4)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "IMG_0001.JPG",
+                "IMG_0001~01234567.JPG",
+                "IMG_0001~01234567-2.JPG",
+                "IMG_0001~01234567-3.JPG"
+            ]
+        );
+        // No extension, a leading dot, and a short md5
+        assert_eq!(
+            name_candidates("noext", "0123456789").nth(1).unwrap(),
+            "noext~01234567"
+        );
+        assert_eq!(
+            name_candidates(".hidden", "ab").nth(1).unwrap(),
+            ".hidden~ab"
+        );
+        // A bounded list, so a search for a free name always ends
+        assert_eq!(
+            name_candidates("a.jpg", "abcdef").count(),
+            MAX_NAME_CANDIDATES
+        );
     }
 }
