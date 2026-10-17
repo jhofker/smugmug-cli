@@ -804,7 +804,25 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
     }
 
     /// Count a failure, to be retried next run.
+    /// Print a failure as it happens. A run can take days, and the summary
+    /// that follows it keeps only the first few errors, so without this a
+    /// container's log says how many files failed but never why.
+    fn log_failure(&self, path: &Path, reason: &dyn std::fmt::Display) {
+        let line = format!(
+            "✗ {}: {}",
+            one_line(&path.display().to_string()),
+            one_line(&reason.to_string())
+        );
+        if std::io::stderr().is_terminal() {
+            // Above the progress bar
+            self.progress.println(line);
+        } else {
+            println!("{}", line);
+        }
+    }
+
     fn fail(&self, prepared: &Prepared, reason: &str) {
+        self.log_failure(&prepared.file.path, &reason);
         let mut stats = self.stats();
         stats.failed += 1;
         stats.error(&prepared.file.path, reason);
@@ -820,12 +838,31 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
         if !refused {
             return self.fail(prepared, &format!("{:#}", error));
         }
+        self.log_failure(
+            &prepared.file.path,
+            &format!("{:#} (not retried until the file changes)", error),
+        );
         let record = prepared.record(None, None, None, Some(error.to_string()));
         self.put(prepared, &record);
         let mut stats = self.stats();
         stats.refused += 1;
         stats.error(&prepared.file.path, error);
     }
+}
+
+/// `text` with control characters (a newline in a file name, an escape
+/// sequence in a reply) shown as escapes, so it can't forge extra lines in
+/// the log.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
 }
 
 /// Worth trying again. A new upload is only retried when SmugMug can't have
@@ -999,6 +1036,7 @@ pub async fn run<T: Smug + Uploads + CollectBackend>(
             match next {
                 Some(Ok(prepared)) => workers.handle(prepared).await,
                 Some(Err((path, e))) => {
+                    workers.log_failure(&path, &format!("{:#}", e));
                     let mut stats = workers.stats();
                     stats.failed += 1;
                     stats.error(&path, format!("{:#}", e));
@@ -1555,6 +1593,16 @@ mod tests {
         assert!(is_transient(&rejected(503), replace));
         assert!(!is_transient(&rejected(413), replace));
         assert!(!is_transient(&anyhow::anyhow!("file vanished"), replace));
+    }
+
+    #[test]
+    fn log_lines_cant_be_forged_by_file_names() {
+        assert_eq!(one_line("/photos/a.jpg"), "/photos/a.jpg");
+        assert_eq!(one_line("/photos/é ü 日本.jpg"), "/photos/é ü 日本.jpg");
+        assert_eq!(
+            one_line("x.jpg\n✗ /photos/fake: ok\u{1b}[31m"),
+            "x.jpg\\n✗ /photos/fake: ok\\u{1b}[31m"
+        );
     }
 
     #[test]
