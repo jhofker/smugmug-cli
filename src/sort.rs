@@ -13,6 +13,9 @@
 use anyhow::{Result, bail};
 use clap::ValueEnum;
 use futures_util::stream::{self, StreamExt};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
+use std::time::Duration;
 
 use crate::api::SmugMugClient;
 use crate::api::albums::{AlbumSettingsUpdate, ChildNode};
@@ -227,11 +230,124 @@ fn album_item(node: &ChildNode, path: String) -> Option<Item> {
     })
 }
 
+/// Plain output reports the listing every this many folders.
+const LIST_REPORT_EVERY: usize = 50;
+
+/// What the user sees while a run goes on: a spinner with a running count
+/// while the tree is listed (which is most of the wait on a big tree), then a
+/// progress bar for the updates. When output isn't a terminal (a log, cron)
+/// it prints plain lines instead, since a bar would only be noise there.
+struct Progress {
+    interactive: bool,
+    bar: ProgressBar,
+    /// Folders listed as of the last plain-text report (when not a terminal).
+    reported: std::cell::Cell<usize>,
+}
+
+impl Progress {
+    fn new() -> Self {
+        let interactive = std::io::stderr().is_terminal();
+        let bar = if interactive {
+            let bar = ProgressBar::new_spinner();
+            bar.set_style(ProgressStyle::with_template("{spinner:.green} {msg}").unwrap());
+            bar.enable_steady_tick(Duration::from_millis(100));
+            bar
+        } else {
+            ProgressBar::hidden()
+        };
+        Progress {
+            interactive,
+            bar,
+            reported: std::cell::Cell::new(0),
+        }
+    }
+
+    fn looking_up(&self, path: &str) {
+        if self.interactive {
+            self.bar.set_message(format!("Looking up {}...", path));
+        } else {
+            println!("Looking up {}...", path);
+        }
+    }
+
+    fn listed(&self, folders: usize, albums: usize) {
+        if self.interactive {
+            self.bar.set_message(format!(
+                "Listing what's under it: {} folders and {} albums found",
+                folders, albums
+            ));
+        } else if folders >= self.reported.get() + LIST_REPORT_EVERY {
+            // A line per folder would be hundreds
+            self.reported.set(folders);
+            println!(
+                "  listed {} folders and {} albums so far...",
+                folders, albums
+            );
+        }
+    }
+
+    /// Switch from the spinner to a bar for `total` updates.
+    fn start_updating(&self, total: usize) {
+        if self.interactive {
+            self.bar.set_length(total as u64);
+            self.bar.set_position(0);
+            // The clock and ETA would otherwise count the time spent listing
+            // the tree, so the first estimate would be hours.
+            self.bar.reset_elapsed();
+            self.bar.reset_eta();
+            self.bar.set_message("");
+            self.bar.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}",
+                )
+                .unwrap()
+                .progress_chars("#>-"),
+            );
+        } else {
+            println!("Checking {} folders and albums...", total);
+        }
+    }
+
+    fn advance(&self, done: usize, total: usize, summary: &SortSummary, dry_run: bool) {
+        let changed = summary.folders_changed + summary.albums_changed;
+        let already = summary.folders_already + summary.albums_already;
+        if self.interactive {
+            self.bar.inc(1);
+            self.bar.set_message(format!(
+                "{} {}, already right {}, failed {}",
+                if dry_run { "would change" } else { "changed" },
+                changed,
+                already,
+                summary.failed.len()
+            ));
+        } else if done < total && is_report_point(done) {
+            println!("  {}/{} done...", done, total);
+        }
+    }
+}
+
+/// Plain output reports every 100 items.
+// `usize::is_multiple_of`, which clippy suggests, needs a newer Rust than
+// the 1.89 this crate builds with.
+#[allow(clippy::manual_is_multiple_of)]
+fn is_report_point(done: usize) -> bool {
+    done % 100 == 0
+}
+
+impl Drop for Progress {
+    /// Leave no spinner or bar behind, including when a run ends in an error.
+    fn drop(&mut self) {
+        self.bar.finish_and_clear();
+    }
+}
+
 /// The folders and albums to change, per `options`.
 async fn collect<B: SortBackend>(
     backend: &B,
     options: &SortOptions,
+    progress: &Progress,
 ) -> Result<(Vec<Item>, Vec<String>)> {
+    progress.looking_up(&options.path);
     let (target, shown) = find(backend, &options.path).await?;
     let is_folder = target.node_type == "Folder";
 
@@ -256,6 +372,7 @@ async fn collect<B: SortBackend>(
         }
         if options.recursive {
             let mut pending = vec![(target.uri.clone(), shown)];
+            let (mut folders_seen, mut albums_seen) = (0, 0);
             while let Some((uri, path)) = pending.pop() {
                 // A folder that can't be listed is reported, and the rest
                 // of the tree is still done.
@@ -270,17 +387,22 @@ async fn collect<B: SortBackend>(
                     let child_path = format!("{}/{}", path, child.name);
                     match child.node_type.as_str() {
                         "Folder" => {
+                            folders_seen += 1;
                             if options.folders.is_some() {
                                 items.push(folder_item(&child, child_path.clone()));
                             }
                             pending.push((child.uri.clone(), child_path));
                         }
-                        "Album" if options.albums.is_some() => {
-                            items.extend(album_item(&child, child_path));
+                        "Album" => {
+                            albums_seen += 1;
+                            if options.albums.is_some() {
+                                items.extend(album_item(&child, child_path));
+                            }
                         }
                         _ => {}
                     }
                 }
+                progress.listed(folders_seen, albums_seen);
             }
         }
     } else if let Some(item) = album_item(&target, shown) {
@@ -347,8 +469,10 @@ pub async fn run<B: SortBackend>(backend: &B, options: &SortOptions) -> Result<S
     if options.folders.is_none() && options.albums.is_none() {
         bail!("Say what to sort: --folders-by and/or --albums-by");
     }
-    let (items, listing_failures) = collect(backend, options).await?;
+    let progress = Progress::new();
+    let (items, listing_failures) = collect(backend, options, &progress).await?;
     let total = items.len();
+    progress.start_updating(total);
     let mut summary = SortSummary {
         failed: listing_failures,
         ..SortSummary::default()
@@ -375,9 +499,7 @@ pub async fn run<B: SortBackend>(backend: &B, options: &SortOptions) -> Result<S
             Outcome::Already => summary.albums_already += 1,
             Outcome::Failed(message) => summary.failed.push(message),
         }
-        if !options.dry_run && done % 100 == 0 && done < total {
-            println!("  {}/{} done...", done, total);
-        }
+        progress.advance(done, total, &summary, options.dry_run);
     }
     Ok(summary)
 }
