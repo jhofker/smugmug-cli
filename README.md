@@ -366,6 +366,13 @@ sm sort Backup --folders-by name --recursive
 - `sm images move <SOURCE_ALBUM> <IMAGE_KEY> <TARGET_ALBUM>` - Move image to a different album
   - `--force` - Force move without confirmation
 
+### Profile
+
+- `sm profile show` - Your profile: names, email, bio, links, bio and cover image
+- `sm profile set [OPTIONS]` - Change it (`""` clears a field)
+  - `--bio <TEXT>`, `--display-name <NAME>`, `--first-name <NAME>`, `--last-name <NAME>`, `--email <EMAIL>`
+  - `--link <SITE=URL>` - A social or web link (`facebook`, `instagram`, `twitter`, `pinterest`, `tumblr`, `flickr`, `500px`, `linkedin`, `vimeo`, `youtube`, `wordpress`, `blogger`, `custom`); repeatable
+
 ### Comments
 
 - `sm comments list <ALBUM> <IMAGE_KEY>` - List comments on an image
