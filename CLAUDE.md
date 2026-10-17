@@ -72,6 +72,8 @@ sm <command>
   - `run.rs`: the pipeline (see below); `Uploads` trait so tests run against the fake
 - **src/backup.rs**: `backup` command: interval loop, `last_run.json`
 - **src/sort.rs**: `sort` command: a folder's child order (node `SortMethod`: Name/DateAdded/DateModified/SortIndex) and an album's photo order (album `SortMethod`: Position/Caption/Filename/Date Uploaded/Date Modified/Date Taken, spelled with spaces) are different settings, given as `--folders-by`/`--albums-by` so `--recursive` only touches the kind asked for; skips nodes already right; `SortBackend` trait with an in-memory fake for tests
+- **src/nodes.rs**: `find(path)` resolves a path of names ("Backup/2014/07") to a folder or album node through the `NodeLookup` trait (root + `!children`); used by `sort` and `organize`
+- **src/organize.rs**: `sm folders rename|move|delete`, `sm albums move`: `PATCH node` (`Name`, optional `UrlName`), `POST <folder node>!movenodes` with `{"MoveUris": "<uri>,<uri>"}`, `DELETE node`; `sm folders cover` PATCHes the node's `HighlightImageUri` (`/api/v2/image/KEY-0`); refuses name clashes and moving a folder into itself; `OrganizeBackend` trait with an in-memory fake for tests. Node field names checked in the Live API Browser; `!movenodes` only shows as owner-only there (404, not "Route Not Found")
 - **src/downloader/**: Album download functionality
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
   - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB

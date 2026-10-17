@@ -16,6 +16,7 @@ use futures_util::stream::{self, StreamExt};
 
 use crate::api::SmugMugClient;
 use crate::api::albums::{AlbumSettingsUpdate, ChildNode};
+use crate::nodes::NodeLookup;
 
 /// How a folder lists its contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -111,10 +112,7 @@ const EXAMPLES: usize = 10;
 // Only implemented and used inside this crate with concrete types, so the
 // Send-bound caveat of async fns in public traits doesn't matter here.
 #[allow(async_fn_in_trait)]
-pub trait SortBackend {
-    /// The account's root folder node.
-    async fn root(&self) -> Result<String>;
-    async fn children(&self, node_uri: &str) -> Result<Vec<ChildNode>>;
+pub trait SortBackend: NodeLookup {
     /// An album's photo sort as SmugMug names it: (method, direction).
     async fn album_sort(&self, album_key: &str) -> Result<(String, String)>;
     async fn set_folder_sort(&self, node_uri: &str, method: &str, direction: &str) -> Result<()>;
@@ -122,12 +120,6 @@ pub trait SortBackend {
 }
 
 impl SortBackend for SmugMugClient {
-    async fn root(&self) -> Result<String> {
-        Ok(self.auth_user().await?.root_node_uri)
-    }
-    async fn children(&self, node_uri: &str) -> Result<Vec<ChildNode>> {
-        self.list_children(node_uri).await
-    }
     async fn album_sort(&self, album_key: &str) -> Result<(String, String)> {
         self.get_album_sort(album_key).await
     }
@@ -162,53 +154,6 @@ enum Item {
     },
 }
 
-/// The folder or album at `path`.
-async fn find<B: SortBackend>(backend: &B, path: &str) -> Result<(ChildNode, String)> {
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    if parts.is_empty() {
-        bail!("Give the folder or album to sort, e.g. Backup or Backup/2014/07");
-    }
-    let mut uri = backend.root().await?;
-    let mut shown = String::new();
-    for (i, part) in parts.iter().enumerate() {
-        let last = i == parts.len() - 1;
-        let matches: Vec<ChildNode> = backend
-            .children(&uri)
-            .await?
-            .into_iter()
-            .filter(|c| {
-                c.name == *part && (c.node_type == "Folder" || (last && c.node_type == "Album"))
-            })
-            .collect();
-        if !shown.is_empty() {
-            shown.push('/');
-        }
-        shown.push_str(part);
-        match matches.len() {
-            1 => {
-                let node = matches.into_iter().next().unwrap();
-                if last {
-                    return Ok((node, shown));
-                }
-                uri = node.uri;
-            }
-            0 => bail!(
-                "No folder{} named '{}' at '{}'",
-                if last { " or album" } else { "" },
-                part,
-                shown
-            ),
-            n => bail!(
-                "{} folders and albums are named '{}' at '{}'; rename one first",
-                n,
-                part,
-                shown
-            ),
-        }
-    }
-    unreachable!("the loop returns on its last part")
-}
-
 fn folder_item(node: &ChildNode, path: String) -> Item {
     Item::Folder {
         path,
@@ -232,7 +177,7 @@ async fn collect<B: SortBackend>(
     backend: &B,
     options: &SortOptions,
 ) -> Result<(Vec<Item>, Vec<String>)> {
-    let (target, shown) = find(backend, &options.path).await?;
+    let (target, shown) = crate::nodes::find(backend, &options.path).await?;
     let is_folder = target.node_type == "Folder";
 
     if is_folder && !options.recursive && options.folders.is_none() {
@@ -554,7 +499,7 @@ mod tests {
         }
     }
 
-    impl SortBackend for Fake {
+    impl NodeLookup for Fake {
         async fn root(&self) -> Result<String> {
             Ok("/node/root".into())
         }
@@ -570,6 +515,9 @@ mod tests {
             }
             Ok(self.children.lock().unwrap()[node_uri].clone())
         }
+    }
+
+    impl SortBackend for Fake {
         async fn album_sort(&self, key: &str) -> Result<(String, String)> {
             Ok(self.album_sort_of(key))
         }
@@ -851,7 +799,7 @@ mod tests {
 
         // No path, a missing one, and an album in the middle of a path
         let err = error_for(folders_by_name("")).await;
-        assert!(err.contains("Give the folder or album"), "{}", err);
+        assert!(err.contains("Give a folder or album"), "{}", err);
         let err = error_for(folders_by_name("Backup/1999")).await;
         assert!(err.contains("No folder or album named '1999'"), "{}", err);
         let err = error_for(folders_by_name("Backup/2014/07/2014-07-12/x")).await;
