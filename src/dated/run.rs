@@ -804,7 +804,21 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
     }
 
     /// Count a failure, to be retried next run.
+    /// Print a failure as it happens. A run can take days, and the summary
+    /// that follows it keeps only the first few errors, so without this a
+    /// container's log says how many files failed but never why.
+    fn log_failure(&self, path: &Path, reason: &dyn std::fmt::Display) {
+        let line = format!("✗ {}: {}", path.display(), reason);
+        if std::io::stderr().is_terminal() {
+            // Above the progress bar
+            self.progress.println(line);
+        } else {
+            println!("{}", line);
+        }
+    }
+
     fn fail(&self, prepared: &Prepared, reason: &str) {
+        self.log_failure(&prepared.file.path, &reason);
         let mut stats = self.stats();
         stats.failed += 1;
         stats.error(&prepared.file.path, reason);
@@ -820,6 +834,10 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
         if !refused {
             return self.fail(prepared, &format!("{:#}", error));
         }
+        self.log_failure(
+            &prepared.file.path,
+            &format!("{:#} (not retried until the file changes)", error),
+        );
         let record = prepared.record(None, None, None, Some(error.to_string()));
         self.put(prepared, &record);
         let mut stats = self.stats();
@@ -999,6 +1017,7 @@ pub async fn run<T: Smug + Uploads + CollectBackend>(
             match next {
                 Some(Ok(prepared)) => workers.handle(prepared).await,
                 Some(Err((path, e))) => {
+                    workers.log_failure(&path, &format!("{:#}", e));
                     let mut stats = workers.stats();
                     stats.failed += 1;
                     stats.error(&path, format!("{:#}", e));
