@@ -88,6 +88,88 @@ pub struct ImageMetadataUpdate {
     pub keywords: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Hide the image in its album (still visible to the owner).
+    pub hidden: Option<bool>,
+    /// The whole keyword list, replacing the old one; see `edit_keywords`.
+    pub keyword_array: Option<Vec<String>>,
+}
+
+impl ImageMetadataUpdate {
+    /// The PATCH body: only the fields that are set.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut body = json!({});
+        if let Some(caption) = &self.caption {
+            body["Caption"] = json!(caption);
+        }
+        if let Some(title) = &self.title {
+            body["Title"] = json!(title);
+        }
+        if let Some(keywords) = &self.keywords {
+            body["Keywords"] = json!(keywords);
+        }
+        if let Some(latitude) = self.latitude {
+            body["Latitude"] = json!(latitude);
+        }
+        if let Some(longitude) = self.longitude {
+            body["Longitude"] = json!(longitude);
+        }
+        if let Some(hidden) = self.hidden {
+            body["Hidden"] = json!(hidden);
+        }
+        if let Some(keyword_array) = &self.keyword_array {
+            body["KeywordArray"] = json!(keyword_array);
+        }
+        body
+    }
+}
+
+/// An image's keywords after adding and removing some. SmugMug keeps them
+/// as one string separated by semicolons (or, from older uploads, commas);
+/// matching ignores case, and a keyword already there isn't added twice.
+pub fn edit_keywords(current: &str, add: &[String], remove: &[String]) -> Vec<String> {
+    let mut keywords: Vec<String> = current
+        .split([';', ','])
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+        .collect();
+    keywords.retain(|k| !remove.iter().any(|r| r.trim().eq_ignore_ascii_case(k)));
+    for keyword in add.iter().map(|k| k.trim()).filter(|k| !k.is_empty()) {
+        if !keywords.iter().any(|k| k.eq_ignore_ascii_case(keyword)) {
+            keywords.push(keyword.to_string());
+        }
+    }
+    keywords
+}
+
+/// One size of an image, from `image/<key>!sizedetails`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SizedImage {
+    #[serde(rename = "Url")]
+    pub url: String,
+    /// File extension of this size, e.g. "jpg" (resized copies of HEIC or
+    /// RAW originals are JPEGs).
+    #[serde(rename = "Ext", default)]
+    pub ext: String,
+    #[serde(rename = "Width", default)]
+    pub width: u32,
+    #[serde(rename = "Height", default)]
+    pub height: u32,
+}
+
+/// The `size` (e.g. "X2Large", as in `ImageSizeX2Large`) from a
+/// `!sizedetails` response, or the largest size there is when the image is
+/// too small to have it (SmugMug doesn't upscale).
+pub fn pick_size(details: &serde_json::Value, size: &str) -> Option<SizedImage> {
+    let wanted = format!("ImageSize{}", size);
+    let usable = details["UsableSizes"].as_array();
+    let is_usable = |name: &str| usable.is_some_and(|u| u.iter().any(|s| s == name));
+    let name = if is_usable(&wanted) {
+        wanted
+    } else {
+        details["LargestImageSize"].as_str()?.to_string()
+    };
+    serde_json::from_value(details.get(&name)?.clone()).ok()
 }
 
 impl SmugMugClient {
@@ -138,31 +220,9 @@ impl SmugMugClient {
         metadata: ImageMetadataUpdate,
     ) -> Result<()> {
         let update_url = format!("https://api.smugmug.com/api/v2/image/{}", image_key);
-
-        // Build JSON body with only provided fields
-        let mut body = json!({});
-
-        if let Some(caption) = metadata.caption {
-            body["Caption"] = json!(caption);
-        }
-
-        if let Some(title) = metadata.title {
-            body["Title"] = json!(title);
-        }
-
-        if let Some(keywords) = metadata.keywords {
-            body["Keywords"] = json!(keywords);
-        }
-
-        if let Some(latitude) = metadata.latitude {
-            body["Latitude"] = json!(latitude);
-        }
-
-        if let Some(longitude) = metadata.longitude {
-            body["Longitude"] = json!(longitude);
-        }
-
-        let response = self.patch_with_auth(&update_url, body).await?;
+        let response = self
+            .patch_with_auth(&update_url, metadata.to_json())
+            .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
@@ -176,6 +236,31 @@ impl SmugMugClient {
         }
 
         Ok(())
+    }
+
+    /// The image in a given size (`ImageSize<size>` in SmugMug's naming,
+    /// e.g. "X2Large"), or its largest size if it's smaller than that.
+    pub async fn image_size(&self, image_key: &str, size: &str) -> Result<SizedImage> {
+        self.image_size_at(
+            &format!(
+                "https://api.smugmug.com/api/v2/image/{}!sizedetails",
+                image_key
+            ),
+            size,
+        )
+        .await
+    }
+
+    async fn image_size_at(&self, url: &str, size: &str) -> Result<SizedImage> {
+        let response = self.get_with_auth(url).await?;
+        let status = response.status();
+        let body_text = response.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("Failed to get image sizes: {} - {}", status, body_text);
+        }
+        let body: serde_json::Value = serde_json::from_str(&body_text)?;
+        pick_size(&body["Response"]["ImageSizeDetails"], size)
+            .ok_or_else(|| anyhow::anyhow!("SmugMug listed no sizes for this image"))
     }
 
     /// Add existing images (Image or AlbumImage URIs) to the album, without
@@ -795,6 +880,7 @@ mod tests {
             keywords: Some("sunset;beach;vacation".to_string()),
             latitude: Some(37.7749),
             longitude: Some(-122.4194),
+            ..Default::default()
         };
 
         assert_eq!(update.caption, Some("Test Caption".to_string()));
@@ -1115,5 +1201,74 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("400"));
+    }
+
+    #[test]
+    fn test_metadata_body_has_hidden_and_keyword_array() {
+        let update = ImageMetadataUpdate {
+            hidden: Some(true),
+            keyword_array: Some(vec!["a".into(), "b c".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            update.to_json(),
+            json!({"Hidden": true, "KeywordArray": ["a", "b c"]})
+        );
+        assert_eq!(ImageMetadataUpdate::default().to_json(), json!({}));
+    }
+
+    #[test]
+    fn test_edit_keywords() {
+        let s = |v: &[&str]| v.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            edit_keywords("smugmug; heroes", &s(&["Dogs", "HEROES"]), &s(&["SmugMug"])),
+            s(&["heroes", "Dogs"])
+        );
+        assert_eq!(edit_keywords("a, b;c ;; ", &[], &s(&["b"])), s(&["a", "c"]));
+        assert_eq!(edit_keywords("", &s(&[" x "]), &[]), s(&["x"]));
+    }
+
+    /// Trimmed from a real `!sizedetails` response (2026-10-17).
+    fn size_details() -> serde_json::Value {
+        json!({
+            "UsableSizes": ["ImageSizeSmall", "ImageSizeX2Large", "ImageSizeOriginal"],
+            "LargestImageSize": "ImageSizeOriginal",
+            "ImageSizeSmall": {"Url": "https://p/S/a-S.jpg", "Ext": "jpg", "Height": 294, "Width": 400, "Size": 44867},
+            "ImageSizeX2Large": {"Url": "https://p/X2/a-X2.jpg", "Ext": "jpg", "Height": 940, "Width": 1280},
+            "ImageSizeOriginal": {"Url": "https://p/O/a.heic", "Ext": "heic", "Height": 4912, "Width": 6690}
+        })
+    }
+
+    #[test]
+    fn test_pick_size() {
+        let details = size_details();
+        let x2 = pick_size(&details, "X2Large").unwrap();
+        assert_eq!(
+            (x2.url.as_str(), x2.ext.as_str(), x2.width),
+            ("https://p/X2/a-X2.jpg", "jpg", 1280)
+        );
+        // Too small for 4K: the largest there is.
+        assert_eq!(pick_size(&details, "4K").unwrap().ext, "heic");
+        assert!(pick_size(&json!({}), "X2Large").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_image_size_reads_size_details() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/api/v2/image/KEY!sizedetails")
+            .with_status(200)
+            .with_body(json!({"Response": {"ImageSizeDetails": size_details()}}).to_string())
+            .create_async()
+            .await;
+        let small = client
+            .image_size_at(
+                &format!("{}/api/v2/image/KEY!sizedetails", server.url()),
+                "Small",
+            )
+            .await
+            .unwrap();
+        assert_eq!(small.width, 400);
     }
 }

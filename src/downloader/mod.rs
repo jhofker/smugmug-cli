@@ -14,6 +14,92 @@ pub struct DownloadOptions {
     pub output_dir: PathBuf,
     pub client: Arc<SmugMugClient>,
     pub threads: usize,
+    /// Size to download photos in; `None` (or `Original`) for the files as
+    /// uploaded. Videos always download as uploaded.
+    pub size: Option<ImageSize>,
+}
+
+/// A size SmugMug serves photos in (`ImageSize<name>` in its API), with
+/// the widths it gave a landscape photo (2026-10-17). A photo smaller than
+/// the size asked for downloads at its largest size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ImageSize {
+    /// 100 px square
+    Tiny,
+    /// 150 px square
+    Thumb,
+    /// 400 px wide at most
+    Small,
+    /// 600 px
+    Medium,
+    /// 800 px
+    Large,
+    /// 1024 px
+    #[value(alias = "xlarge")]
+    XLarge,
+    /// 1280 px
+    #[value(alias = "x2large")]
+    X2Large,
+    /// 1600 px
+    #[value(alias = "x3large")]
+    X3Large,
+    /// 2048 px
+    #[value(alias = "x4large")]
+    X4Large,
+    /// 2560 px
+    #[value(alias = "x5large")]
+    X5Large,
+    /// 3840 px
+    #[value(name = "4k")]
+    FourK,
+    /// 5120 px
+    #[value(name = "5k")]
+    FiveK,
+    /// The file as uploaded
+    Original,
+}
+
+impl ImageSize {
+    /// SmugMug's name, as in `ImageSizeX2Large`.
+    pub fn api_name(self) -> &'static str {
+        match self {
+            ImageSize::Tiny => "Tiny",
+            ImageSize::Thumb => "Thumb",
+            ImageSize::Small => "Small",
+            ImageSize::Medium => "Medium",
+            ImageSize::Large => "Large",
+            ImageSize::XLarge => "XLarge",
+            ImageSize::X2Large => "X2Large",
+            ImageSize::X3Large => "X3Large",
+            ImageSize::X4Large => "X4Large",
+            ImageSize::X5Large => "X5Large",
+            ImageSize::FourK => "4K",
+            ImageSize::FiveK => "5K",
+            ImageSize::Original => "Original",
+        }
+    }
+}
+
+/// Whether an album item is a video (by SmugMug's `Format`), which has no
+/// resized photo copies.
+fn is_video(image: &AlbumImage) -> bool {
+    const VIDEO_FORMATS: &[&str] = &[
+        "MP4", "MOV", "M4V", "AVI", "MPG", "MPEG", "MTS", "M2TS", "3GP", "WMV", "MKV", "WEBM",
+    ];
+    VIDEO_FORMATS.contains(&image.format.to_uppercase().as_str())
+}
+
+/// The file name for a resized copy: the original's stem with the size's
+/// extension (resized HEIC and RAW photos are JPEGs).
+fn sized_file_name(file_name: &str, ext: &str) -> String {
+    if ext.is_empty() {
+        return file_name.to_string();
+    }
+    let stem = std::path::Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+    format!("{}.{}", stem, ext)
 }
 
 pub struct DownloadStats {
@@ -79,11 +165,13 @@ pub async fn download_album(options: DownloadOptions) -> Result<DownloadStats> {
     let output_dir = Arc::new(options.output_dir);
     let mut handles = vec![];
 
+    let size = options.size.filter(|s| *s != ImageSize::Original);
     for _ in 0..options.threads {
         let queue = queue.clone();
         let stats = stats.clone();
         let progress = overall_progress.clone();
         let output_dir = output_dir.clone();
+        let api = options.client.clone();
 
         let handle = tokio::spawn(async move {
             let http_client = reqwest::Client::new();
@@ -99,8 +187,18 @@ pub async fn download_album(options: DownloadOptions) -> Result<DownloadStats> {
                     break;
                 };
 
-                // Download the image
-                match download_image(&http_client, &image, &output_dir).await {
+                // Download the image, or the size asked for
+                let result = match size.filter(|_| !is_video(&image)) {
+                    None => download_image(&http_client, &image, &output_dir).await,
+                    Some(size) => match api.image_size(&image.image_key, size.api_name()).await {
+                        Ok(sized) => {
+                            let name = sized_file_name(&image.file_name, &sized.ext);
+                            download_file(&http_client, &sized.url, &name, &output_dir).await
+                        }
+                        Err(e) => Err(e),
+                    },
+                };
+                match result {
                     Ok(bytes_downloaded) => {
                         let mut stats = stats.lock().await;
                         stats.downloaded += 1;
@@ -143,9 +241,20 @@ async fn download_image(
     image: &AlbumImage,
     output_dir: &PathBuf,
 ) -> Result<u64> {
-    // Download the image from the archived URI
+    // The file as uploaded
+    download_file(client, &image.archived_uri, &image.file_name, output_dir).await
+}
+
+/// Download `url` into `output_dir` as `file_name`, adding `_1`, `_2`, ...
+/// when that name is taken.
+async fn download_file(
+    client: &reqwest::Client,
+    url: &str,
+    file_name: &str,
+    output_dir: &std::path::Path,
+) -> Result<u64> {
     let response = client
-        .get(&image.archived_uri)
+        .get(url)
         .send()
         .await
         .context("Failed to download image")?;
@@ -162,7 +271,7 @@ async fn download_image(
     let bytes_len = bytes.len() as u64;
 
     // Determine output file path, handling filename conflicts
-    let mut output_path = output_dir.join(&image.file_name);
+    let mut output_path = output_dir.join(file_name);
     let mut counter = 1;
 
     while output_path.exists() {
@@ -245,6 +354,7 @@ mod tests {
             output_dir: PathBuf::from("/tmp/test"),
             client: client.clone(),
             threads: 4,
+            size: None,
         };
 
         assert_eq!(options.album_key, "test_album");
@@ -738,5 +848,24 @@ mod tests {
         assert!(result3.is_ok());
         assert_eq!(result3.unwrap(), 5000);
         mock3.assert_async().await;
+    }
+
+    #[test]
+    fn test_sized_file_name_takes_the_size_extension() {
+        assert_eq!(sized_file_name("IMG_1.HEIC", "jpg"), "IMG_1.jpg");
+        assert_eq!(sized_file_name("a.b.jpg", "jpg"), "a.b.jpg");
+        assert_eq!(sized_file_name("noext", "jpg"), "noext.jpg");
+        assert_eq!(sized_file_name("x.png", ""), "x.png");
+    }
+
+    #[test]
+    fn test_videos_keep_their_original() {
+        let mut image = create_test_image("clip.mp4", "K");
+        image.format = "MP4".into();
+        assert!(is_video(&image));
+        image.format = "JPG".into();
+        assert!(!is_video(&image));
+        assert_eq!(ImageSize::X2Large.api_name(), "X2Large");
+        assert_eq!(ImageSize::FourK.api_name(), "4K");
     }
 }
