@@ -114,9 +114,10 @@ impl FoundImage {
 /// What `search_images` looks for. Every field given must match.
 #[derive(Debug, Default, Clone)]
 pub struct ImageSearch {
-    /// Words in the title, caption, keywords or file name.
+    /// Words in any text field (title, caption, keywords, file name).
     pub text: Option<String>,
-    pub keywords: Option<String>,
+    /// Keywords the images are tagged with.
+    pub keywords: Vec<String>,
     /// Taken at or after this instant (as SmugMug stores it).
     pub taken_start: Option<chrono::DateTime<chrono::Utc>>,
     /// Taken at or before this instant.
@@ -126,7 +127,7 @@ pub struct ImageSearch {
 impl ImageSearch {
     pub fn is_empty(&self) -> bool {
         self.text.is_none()
-            && self.keywords.is_none()
+            && self.keywords.is_empty()
             && self.taken_start.is_none()
             && self.taken_end.is_none()
     }
@@ -137,8 +138,11 @@ impl ImageSearch {
         if let Some(text) = &self.text {
             params.push(("Text", text.clone()));
         }
-        if let Some(keywords) = &self.keywords {
-            params.push(("Keywords", keywords.clone()));
+        // One keyword as is, several as a JSON array.
+        match self.keywords.as_slice() {
+            [] => {}
+            [keyword] => params.push(("Keywords", keyword.clone())),
+            keywords => params.push(("Keywords", serde_json::to_string(keywords).unwrap())),
         }
         if let Some(start) = &self.taken_start {
             params.push(("DateTakenStart", format(start)));
@@ -146,6 +150,20 @@ impl ImageSearch {
         if let Some(end) = &self.taken_end {
             params.push(("DateTakenEnd", format(end)));
         }
+        // SmugMug defaults to "Popular". A date range reads best oldest
+        // first; otherwise show the newest first. Text searches still put
+        // relevant results ahead (`Relevance` defaults to true).
+        let date_range = self.taken_start.is_some() || self.taken_end.is_some();
+        params.push(("SortMethod", "DateTaken".to_string()));
+        params.push((
+            "SortDirection",
+            if date_range {
+                "Ascending"
+            } else {
+                "Descending"
+            }
+            .to_string(),
+        ));
         params
     }
 }
@@ -1245,6 +1263,8 @@ mod tests {
                     "2026-05-01T07:00:00Z".into(),
                 ),
                 mockito::Matcher::UrlEncoded("DateTakenEnd".into(), "2026-05-02T06:59:59Z".into()),
+                mockito::Matcher::UrlEncoded("SortMethod".into(), "DateTaken".into()),
+                mockito::Matcher::UrlEncoded("SortDirection".into(), "Ascending".into()),
             ]))
             .with_status(200)
             .with_body(
@@ -1281,7 +1301,7 @@ mod tests {
         };
         let search = ImageSearch {
             text: Some("beach day".into()),
-            keywords: Some("sunset".into()),
+            keywords: vec!["sunset".into()],
             taken_start: Some(day(false)),
             taken_end: Some(day(true)),
         };
@@ -1322,8 +1342,19 @@ mod tests {
             search.params("/api/v2/user/me"),
             vec![
                 ("Scope", "/api/v2/user/me".to_string()),
-                ("Text", "cat".to_string())
+                ("Text", "cat".to_string()),
+                ("SortMethod", "DateTaken".to_string()),
+                ("SortDirection", "Descending".to_string()),
             ]
+        );
+
+        let search = ImageSearch {
+            keywords: vec!["cat".into(), "dog \"rex\"".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            search.params("/api/v2/user/me")[1],
+            ("Keywords", r#"["cat","dog \"rex\""]"#.to_string())
         );
     }
 }

@@ -69,7 +69,7 @@ fn print_tree(node: &api::NodeTree, prefix: &str, is_last: bool) {
 /// which SmugMug stores as if they were US Pacific time (see `api::taken`).
 fn image_search(
     text: Option<String>,
-    keyword: Option<String>,
+    keywords: Vec<String>,
     taken_from: Option<String>,
     taken_to: Option<String>,
 ) -> Result<api::images::ImageSearch> {
@@ -86,7 +86,7 @@ fn image_search(
     }
     Ok(api::images::ImageSearch {
         text,
-        keywords: keyword,
+        keywords,
         // The widest range covering the clock times, for the hours daylight
         // saving repeats or skips.
         taken_start: start.map(|t| api::taken::stored_span(t).0),
@@ -135,7 +135,7 @@ async fn print_found_images(
                 Some(album) => println!("    Album: {} ({})", album, key),
                 None => println!("    Album: {}", key),
             },
-            None => println!("    Album: (unknown)"),
+            None => {}
         }
         println!("    Image Key: {}", image.image_key);
         if let Some(web_uri) = &image.web_uri {
@@ -540,9 +540,9 @@ enum ImageCommands {
         #[arg(long)]
         text: Option<String>,
 
-        /// Keyword the images are tagged with
+        /// Keyword the images are tagged with (repeat for several)
         #[arg(long)]
-        keyword: Option<String>,
+        keyword: Vec<String>,
 
         /// Taken on or after this date, by the camera's clock (YYYY-MM-DD,
         /// optionally followed by HH:MM or HH:MM:SS)
@@ -1196,17 +1196,10 @@ async fn main() -> Result<()> {
                         );
                         return Ok(());
                     }
-                    // Only date filters: show the images in the order they were taken.
-                    let by_date = search.text.is_none() && search.keywords.is_none();
                     let limit = (limit > 0).then_some(limit);
                     println!("Searching your images...\n");
                     match client.search_images(&search, limit).await {
-                        Ok(mut images) => {
-                            if by_date {
-                                images.sort_by_key(|image| image.taken());
-                            }
-                            print_found_images(&client, &images, limit).await;
-                        }
+                        Ok(images) => print_found_images(&client, &images, limit).await,
                         Err(e) => println!("{}", error(&format!("Search failed: {}", e))),
                     }
                 }

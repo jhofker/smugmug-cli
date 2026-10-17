@@ -356,10 +356,10 @@ sm sort Backup --folders-by name --recursive
 - `sm images list <ALBUM>` - List images in an album
 - `sm images search [OPTIONS]` - Search your images; prints each one's date taken, file name, album and web address
   - `--text <TEXT>` - Words in titles, captions, keywords and file names
-  - `--keyword <KEYWORD>` - Keyword the images are tagged with
+  - `--keyword <KEYWORD>` - Keyword the images are tagged with (repeat for several)
   - `--taken-from <DATE>` / `--taken-to <DATE>` - Date taken range by the camera's clock (`YYYY-MM-DD`, optionally with `HH:MM[:SS]`; a date alone covers the whole day)
   - `--limit <N>` - Show at most N images (default 100, 0 for all)
-  - Newly uploaded images take a few minutes to show up in search
+  - Results come newest first, or oldest first when a date range is given. Newly uploaded images take a few minutes to show up in search
 - `sm images recent` - List your most recently uploaded images
   - `--limit <N>` - Show at most N images (default 20, 0 for all)
 - `sm images info <ALBUM> <IMAGE_KEY>` - Show detailed information about an image
