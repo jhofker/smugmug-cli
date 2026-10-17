@@ -141,11 +141,6 @@ struct TopKeywords {
 }
 
 impl SmugMugClient {
-    /// List all comments on an image
-    pub async fn list_image_comments(&self, image_key: &str) -> Result<Vec<Comment>> {
-        self.list_comments(CommentTarget::Image(image_key)).await
-    }
-
     /// List all comments on an image or album
     pub async fn list_comments(&self, target: CommentTarget<'_>) -> Result<Vec<Comment>> {
         self.list_comments_at(&target.comments_url()).await
@@ -155,16 +150,6 @@ impl SmugMugClient {
         self.get_all_pages(url, "Comment")
             .await
             .context("Failed to list comments")
-    }
-
-    /// Create a new comment on an image
-    pub async fn create_image_comment(
-        &self,
-        image_key: &str,
-        request: CreateCommentRequest,
-    ) -> Result<Comment> {
-        self.create_comment(CommentTarget::Image(image_key), request)
-            .await
     }
 
     /// Create a new comment on an image or album
@@ -301,7 +286,9 @@ mod tests {
             link: None,
         };
 
-        let result = client.create_image_comment("IMG123", request).await;
+        let result = client
+            .create_comment(CommentTarget::Image("IMG123"), request)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("cannot be empty"));
     }
@@ -323,7 +310,9 @@ mod tests {
             link: None,
         };
 
-        let result = client.create_image_comment("IMG123", request).await;
+        let result = client
+            .create_comment(CommentTarget::Image("IMG123"), request)
+            .await;
         assert!(result.is_err());
         assert!(
             result
@@ -350,7 +339,9 @@ mod tests {
             link: None,
         };
 
-        let result = client.create_image_comment("IMG123", request).await;
+        let result = client
+            .create_comment(CommentTarget::Image("IMG123"), request)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("50 characters"));
     }
@@ -372,7 +363,9 @@ mod tests {
             link: None,
         };
 
-        let result = client.create_image_comment("IMG123", request).await;
+        let result = client
+            .create_comment(CommentTarget::Image("IMG123"), request)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("between 0 and 5"));
     }
