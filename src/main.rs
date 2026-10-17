@@ -124,6 +124,8 @@ mod cache;
 mod config;
 mod dated;
 mod downloader;
+mod nodes;
+mod organize;
 mod raw;
 mod scanner;
 mod sort;
@@ -153,6 +155,12 @@ enum Commands {
     Albums {
         #[command(subcommand)]
         command: AlbumCommands,
+    },
+
+    /// Rename, move and delete folders
+    Folders {
+        #[command(subcommand)]
+        command: FolderCommands,
     },
 
     /// Image management
@@ -396,6 +404,17 @@ enum AlbumCommands {
         sort_direction: Option<String>,
     },
 
+    /// Move an album into another folder
+    Move {
+        /// The album, as a path of names from the top of your account
+        /// (e.g. Trips/Paris)
+        album: String,
+
+        /// The folder to move it into, as a path of names ("/" for the top
+        /// of your account)
+        folder: String,
+    },
+
     /// Get album download link (ZIP file)
     GetDownloadLink {
         /// Album name or key
@@ -404,6 +423,55 @@ enum AlbumCommands {
         /// Wait for download generation (polls until ready)
         #[arg(short, long)]
         wait: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum FolderCommands {
+    /// Rename a folder or album. Its web address stays the same unless
+    /// --url-name is given
+    Rename {
+        /// The folder or album, as a path of names from the top of your
+        /// account (e.g. Trips/2026)
+        path: String,
+
+        /// The new name
+        name: String,
+
+        /// Also change its part of the web address (starts with a capital
+        /// letter; letters, digits and hyphens, e.g. Summer-2026). Links to
+        /// the old address stop working
+        #[arg(long)]
+        url_name: Option<String>,
+    },
+
+    /// Move a folder, with everything in it, into another folder
+    Move {
+        /// The folder, as a path of names from the top of your account
+        path: String,
+
+        /// The folder to move it into ("/" for the top of your account)
+        destination: String,
+    },
+
+    /// Set the photo that represents a folder or album
+    Cover {
+        /// The folder or album, as a path of names from the top of your
+        /// account
+        path: String,
+
+        /// The photo's image key (see `sm images list` or `sm images search`)
+        image_key: String,
+    },
+
+    /// Delete a folder and everything in it: folders, albums and photos
+    Delete {
+        /// The folder, as a path of names from the top of your account
+        path: String,
+
+        /// Delete without asking first
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
@@ -939,6 +1007,15 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                AlbumCommands::Move { album, folder } => {
+                    match organize::move_to(&*client, &album, &folder, organize::Kind::Album).await
+                    {
+                        Ok((moved, to)) => {
+                            println!("{}", success(&format!("Moved '{}' into {}", moved, to)))
+                        }
+                        Err(e) => println!("{}", error(&e.to_string())),
+                    }
+                }
                 AlbumCommands::GetDownloadLink { album, wait } => {
                     println!("Looking up album: {}", album);
 
@@ -997,6 +1074,97 @@ async fn main() -> Result<()> {
                                 println!("\n✗ Failed to request download: {}", e);
                             }
                         }
+                    }
+                }
+            }
+        }
+        Commands::Folders { command } => {
+            let cfg = config::load_config()?;
+            let client = api::SmugMugClient::new(
+                cfg.auth.api_key,
+                cfg.auth.api_secret,
+                cfg.auth.access_token,
+                cfg.auth.access_token_secret,
+            );
+
+            match command {
+                FolderCommands::Rename {
+                    path,
+                    name,
+                    url_name,
+                } => match organize::rename(&client, &path, &name, url_name.as_deref()).await {
+                    Ok(old) => println!("{}", success(&format!("Renamed '{}' to '{}'", old, name))),
+                    Err(e) => println!("{}", error(&e.to_string())),
+                },
+                FolderCommands::Move { path, destination } => {
+                    match organize::move_to(&client, &path, &destination, organize::Kind::Folder)
+                        .await
+                    {
+                        Ok((moved, to)) => {
+                            println!("{}", success(&format!("Moved '{}' into {}", moved, to)))
+                        }
+                        Err(e) => println!("{}", error(&e.to_string())),
+                    }
+                }
+                FolderCommands::Cover { path, image_key } => {
+                    match organize::find(&client, &path, organize::Kind::Either).await {
+                        Ok(target) => {
+                            match client.set_node_cover(&target.node.uri, &image_key).await {
+                                Ok(()) => println!(
+                                    "{}",
+                                    success(&format!(
+                                        "Set the cover of '{}' to {}",
+                                        target.path, image_key
+                                    ))
+                                ),
+                                Err(e) => println!("{}", error(&e.to_string())),
+                            }
+                        }
+                        Err(e) => println!("{}", error(&e.to_string())),
+                    }
+                }
+                FolderCommands::Delete { path, force } => {
+                    let (target, contents) = match organize::inspect_folder(&client, &path).await {
+                        Ok(found) => found,
+                        Err(e) => {
+                            println!("{}", error(&e.to_string()));
+                            return Ok(());
+                        }
+                    };
+
+                    println!("Folder: {}", highlight(&target.path));
+                    println!(
+                        "  Directly inside: {} folders, {} albums{}",
+                        format_number(contents.folders),
+                        format_number(contents.albums),
+                        if contents.pages > 0 {
+                            format!(", {} pages", format_number(contents.pages))
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if !force {
+                        use dialoguer::Confirm;
+                        println!(
+                            "\n{}",
+                            warning(
+                                "This deletes the folder and everything in it, including every photo in its albums. It cannot be undone."
+                            )
+                        );
+                        let confirmed = Confirm::new()
+                            .with_prompt(format!("Delete '{}'?", target.path))
+                            .default(false)
+                            .interact()?;
+                        if !confirmed {
+                            println!("\nDeletion cancelled.");
+                            return Ok(());
+                        }
+                    }
+
+                    println!("\nDeleting folder...");
+                    match client.delete_node(&target.node.uri).await {
+                        Ok(()) => println!("{}", success(&format!("Deleted '{}'", target.path))),
+                        Err(e) => println!("{}", error(&e.to_string())),
                     }
                 }
             }

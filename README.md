@@ -348,8 +348,20 @@ sm sort Backup --folders-by name --recursive
   - `--keywords <KEYWORDS>` - Set keywords (semicolon-separated)
   - `--sort-method <METHOD>` - Set sort method (Position, Caption, FileName, DateTimeOriginal, DateTimeUploaded)
   - `--sort-direction <DIR>` - Set sort direction (asc, desc)
+- `sm albums move <ALBUM_PATH> <FOLDER_PATH>` - Move an album into another folder (paths of names, e.g. `Trips/Paris`; `/` is the top of your account)
 - `sm albums get-download-link <ALBUM>` - Get album download link (ZIP file)
   - `--wait` - Wait for download generation (polls until ready)
+
+### Folders
+
+Folders and albums are given as paths of names from the top of your account, e.g. `Trips/2026`.
+
+- `sm folders rename <PATH> <NEW_NAME>` - Rename a folder or album
+  - `--url-name <NAME>` - Also change its part of the web address (links to the old address stop working)
+- `sm folders move <PATH> <DESTINATION>` - Move a folder into another folder (`/` for the top of your account)
+- `sm folders cover <PATH> <IMAGE_KEY>` - Set the photo that represents a folder or album
+- `sm folders delete <PATH>` - Delete a folder and everything in it, after showing what's inside and asking
+  - `--force` - Delete without asking
 
 ### Images
 

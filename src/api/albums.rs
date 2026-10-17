@@ -254,6 +254,16 @@ pub struct AlbumSettingsUpdate {
     pub sort_direction: Option<String>,
 }
 
+/// The image URI for an image key, which SmugMug writes with the image's
+/// serial (`KEY-0`); a key that has one already is kept as it is.
+pub fn image_uri(image_key: &str) -> String {
+    if image_key.contains('-') {
+        format!("/api/v2/image/{}", image_key)
+    } else {
+        format!("/api/v2/image/{}-0", image_key)
+    }
+}
+
 impl SmugMugClient {
     pub async fn list_albums(&self) -> Result<Vec<Album>> {
         // First get the authenticated user info
@@ -353,6 +363,91 @@ impl SmugMugClient {
                 status,
                 body_text
             );
+        }
+        Ok(())
+    }
+
+    /// Rename the folder or album at `node_uri`. `url_name` (the part of
+    /// its web address) stays as it is unless given.
+    pub async fn rename_node(
+        &self,
+        node_uri: &str,
+        name: &str,
+        url_name: Option<&str>,
+    ) -> Result<()> {
+        self.rename_node_at(
+            &format!("https://api.smugmug.com{}", node_uri),
+            name,
+            url_name,
+        )
+        .await
+    }
+
+    async fn rename_node_at(&self, url: &str, name: &str, url_name: Option<&str>) -> Result<()> {
+        let mut body = serde_json::json!({ "Name": name });
+        if let Some(url_name) = url_name {
+            body["UrlName"] = serde_json::json!(url_name);
+        }
+        let response = self.patch_with_auth(url, body).await?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("Failed to rename: {} - {}", status, response.text().await?);
+        }
+        Ok(())
+    }
+
+    /// Set the image that represents the folder or album at `node_uri`
+    /// (its highlight, or cover, image).
+    pub async fn set_node_cover(&self, node_uri: &str, image_key: &str) -> Result<()> {
+        self.set_node_cover_at(&format!("https://api.smugmug.com{}", node_uri), image_key)
+            .await
+    }
+
+    async fn set_node_cover_at(&self, url: &str, image_key: &str) -> Result<()> {
+        let body = serde_json::json!({ "HighlightImageUri": image_uri(image_key) });
+        let response = self.patch_with_auth(url, body).await?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!(
+                "Failed to set the cover image: {} - {}",
+                status,
+                response.text().await?
+            );
+        }
+        Ok(())
+    }
+
+    /// Move folders or albums (node URIs) into the folder at `folder_uri`.
+    pub async fn move_nodes(&self, folder_uri: &str, node_uris: &[String]) -> Result<()> {
+        self.move_nodes_at(
+            &format!("https://api.smugmug.com{}!movenodes", folder_uri),
+            node_uris,
+        )
+        .await
+    }
+
+    async fn move_nodes_at(&self, url: &str, node_uris: &[String]) -> Result<()> {
+        // Comma-separated, like CollectUris.
+        let body = serde_json::json!({ "MoveUris": node_uris.join(",") });
+        let response = self.post_with_auth(url, body).await?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("Failed to move: {} - {}", status, response.text().await?);
+        }
+        Ok(())
+    }
+
+    /// Delete the folder or album at `node_uri`, with everything in it.
+    pub async fn delete_node(&self, node_uri: &str) -> Result<()> {
+        self.delete_node_at(&format!("https://api.smugmug.com{}", node_uri))
+            .await
+    }
+
+    async fn delete_node_at(&self, url: &str) -> Result<()> {
+        let response = self.delete_with_auth(url).await?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("Failed to delete: {} - {}", status, response.text().await?);
         }
         Ok(())
     }
@@ -1995,5 +2090,108 @@ mod tests {
                 "SortDirection": "Ascending"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn rename_node_sends_name_and_url_name_only_when_given() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let name_only = server
+            .mock("PATCH", "/api/v2/node/N1")
+            .match_body(mockito::Matcher::Json(serde_json::json!({"Name": "Trips"})))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        let both = server
+            .mock("PATCH", "/api/v2/node/N2")
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"Name": "Trips", "UrlName": "Trips"}),
+            ))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        let url = |id: &str| format!("{}/api/v2/node/{}", server.url(), id);
+        client
+            .rename_node_at(&url("N1"), "Trips", None)
+            .await
+            .unwrap();
+        client
+            .rename_node_at(&url("N2"), "Trips", Some("Trips"))
+            .await
+            .unwrap();
+        name_only.assert_async().await;
+        both.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn move_nodes_posts_the_uris_comma_separated() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v2/node/DEST!movenodes")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "MoveUris": "/api/v2/node/A,/api/v2/node/B"
+            })))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+
+        client
+            .move_nodes_at(
+                &format!("{}/api/v2/node/DEST!movenodes", server.url()),
+                &["/api/v2/node/A".to_string(), "/api/v2/node/B".to_string()],
+            )
+            .await
+            .unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn node_changes_report_refusals() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let _patch = server
+            .mock("PATCH", "/api/v2/node/N1")
+            .with_status(400)
+            .with_body(r#"{"Code":400,"Message":"Bad Request"}"#)
+            .create_async()
+            .await;
+        let _delete = server
+            .mock("DELETE", "/api/v2/node/N1")
+            .with_status(403)
+            .with_body(r#"{"Code":403,"Message":"Forbidden"}"#)
+            .create_async()
+            .await;
+
+        let url = format!("{}/api/v2/node/N1", server.url());
+        let err = client.rename_node_at(&url, "x", None).await.unwrap_err();
+        assert!(err.to_string().contains("400"), "{}", err);
+        let err = client.delete_node_at(&url).await.unwrap_err();
+        assert!(err.to_string().contains("403"), "{}", err);
+    }
+
+    #[tokio::test]
+    async fn set_node_cover_sends_the_image_uri() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("PATCH", "/api/v2/node/N1")
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"HighlightImageUri": "/api/v2/image/AbC12-0"}),
+            ))
+            .with_status(200)
+            .with_body("{}")
+            .create_async()
+            .await;
+        client
+            .set_node_cover_at(&format!("{}/api/v2/node/N1", server.url()), "AbC12")
+            .await
+            .unwrap();
+        mock.assert_async().await;
+        assert_eq!(image_uri("AbC12-3"), "/api/v2/image/AbC12-3");
     }
 }
