@@ -113,6 +113,8 @@ SmugMug list endpoints (`!albums`, `!images`, `!comments`, `!children`, ...) ret
 
 To check an endpoint's parameters or field names without an account, request it with `Accept: text/html` (e.g. `curl -H 'Accept: text/html' 'https://api.smugmug.com/api/v2/album/SJT3DX'`): SmugMug's Live API Browser answers without credentials, and the page embeds the JSON response with `Options` (parameters, types, allowed values) even for a 400. Owner-only fields and links (an image's `WebUri` and `ImageAlbum`) are missing from these anonymous views. `image!search` takes `Scope` (required), `Text`, `Keywords` (one, or a JSON array), `DateTakenStart`/`End`, `DateUploadedStart`/`End`, `Type` (Image/Video), `SortMethod` (DateTaken/DateUploaded/Popular, default Popular), `SortDirection`, `Relevance`.
 
+Album templates (`user/<nick>!albumtemplates`, `--template`, `album_template` in `[upload]`/`[backup]`): `main.rs` resolves the name once (`use_album_template`, skipped on dry runs) and `SmugMugClient::set_album_template` stores the template URI; `create_album` then PATCHes `{"AlbumTemplateUri": uri}` onto every album it creates (a failure only warns), so dated, single-album and `--structure` uploads all pick it up. Existing albums are never changed.
+
 SmugMug's Library ("All Media") would be the natural default destination, but its endpoints (`upload.smugmug.com/api/v2/library`, `/api/v2/library!assets`) return 404 to OAuth API keys as of 2026-09; `api::upload::upload_to_library` and the hidden `debug` commands are kept for when that changes.
 
 ### Dated uploads and `backup`
