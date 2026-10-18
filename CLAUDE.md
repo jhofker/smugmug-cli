@@ -81,6 +81,7 @@ sm <command>
 - **src/raw/**: RAW → JPEG for accounts without SmugMug Source (`raw_mode`)
   - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB
   - `jpeg.rs`: finds embedded JPEG previews by walking the file for well-formed JPEG streams (rejects lossless SOF3 streams, which are sensor data in CR2/DNG)
+  - `convert_image_bytes`: TIFF and BMP files (`scanner::is_convertible_image`) get the same treatment when RAW handling is `Render` (SmugMug refuses them without Source too, code 6): decoded with `image` (first page, 8-bit RGB, no alpha), JPEG quality 92, TIFF EXIF copied in; uploaded as `<stem>.jpg`, cached under the original's SHA-256. `raw_mode = skip` leaves them uploading as originals. CMYK TIFFs fail to decode and are recorded as failed
   - `exif.rs`: reads IFD0/EXIF/GPS from TIFF-based RAWs and CR3 `CMT1/2/4` boxes (formats `little_exif` doesn't parse) and writes them into the JPEG with `little_exif`
 - **src/api/taken.rs**: capture times as SmugMug stores them (camera clock read as US Pacific time, see Collecting below); used by `sm images search --taken-from/--taken-to` and to print dates taken
 - **src/config.rs`: Configuration management (TOML file + environment variables)

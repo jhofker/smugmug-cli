@@ -340,7 +340,7 @@ fn prepare(pending: PendingFile, ctx: &ReadContext) -> Result<Prepared> {
         }
     };
 
-    if ctx.render_raw && crate::scanner::is_raw_file(&file.path) {
+    if ctx.render_raw && crate::scanner::is_renderable(&file.path) {
         let data = std::fs::read(&file.path).context("Failed to read file")?;
         let sha256 = hex::encode(Sha256::digest(&data));
         let (date, date_source) = date_for(&file, Some(&data), &ctx.index);
@@ -349,8 +349,8 @@ fn prepare(pending: PendingFile, ctx: &ReadContext) -> Result<Prepared> {
         } else if let Some(cached) = known(&sha256)? {
             Kind::Known(cached)
         } else {
-            let rendered = crate::raw::render_jpeg_bytes(&data)
-                .context("Failed to render RAW file to JPEG")?
+            let rendered = crate::raw::render_file_bytes(&file.path, &data)
+                .context("Failed to render file to JPEG")?
                 .data;
             let md5 = format!("{:x}", md5::compute(&rendered));
             let same_render = previous.as_ref().is_some_and(|r| {
