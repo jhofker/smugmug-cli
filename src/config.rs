@@ -49,6 +49,15 @@ pub struct UploadConfig {
     /// uploads create.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album_template: Option<String>,
+    /// Longest video SmugMug accepts, in minutes (its help center says 20).
+    /// Longer ones are left unsent and recorded as refused. 0 turns the
+    /// check off.
+    #[serde(default = "default_max_video_minutes")]
+    pub max_video_minutes: u32,
+}
+
+fn default_max_video_minutes() -> u32 {
+    20
 }
 
 /// The video half of a Live Photo: a short video with the same name as a
@@ -177,6 +186,7 @@ impl Default for Config {
                 read_threads: default_read_threads(),
                 live_photo_videos: LivePhotoVideos::default(),
                 album_template: None,
+                max_video_minutes: 20,
             },
             deduplication: DeduplicationConfig {
                 enabled: true,
@@ -649,6 +659,7 @@ mod tests {
                 read_threads: default_read_threads(),
                 live_photo_videos: LivePhotoVideos::default(),
                 album_template: None,
+                max_video_minutes: 20,
             },
             deduplication: DeduplicationConfig {
                 enabled: false,
@@ -1150,6 +1161,7 @@ cache_path = "/absolute/path/cache.db"
             read_threads: 2,
             live_photo_videos: LivePhotoVideos::default(),
             album_template: None,
+            max_video_minutes: 20,
         };
 
         let debug_string = format!("{:?}", upload);
@@ -1188,6 +1200,7 @@ cache_path = "/absolute/path/cache.db"
                 read_threads: default_read_threads(),
                 live_photo_videos: LivePhotoVideos::default(),
                 album_template: None,
+                max_video_minutes: 20,
             },
             deduplication: DeduplicationConfig {
                 enabled: true,

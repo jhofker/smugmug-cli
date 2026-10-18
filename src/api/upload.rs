@@ -536,6 +536,14 @@ pub struct UploadFailed {
 }
 
 impl UploadFailed {
+    /// Refused for the file itself, so trying again won't help until it
+    /// changes: 6 (needs SmugMug Source), 64 (unknown file type), 71 (video
+    /// too long), 72 (video too small). Other codes (auth, rate limits)
+    /// stay retryable.
+    pub fn is_permanent(&self) -> bool {
+        matches!(self.code, Some(6 | 64 | 71 | 72))
+    }
+
     fn describe(&self) -> String {
         match (&self.message, self.code) {
             (Some(message), Some(code)) => format!("{} (code {})", message, code),
@@ -784,6 +792,15 @@ mod tests {
             err.to_string(),
             "SmugMug refused the upload: Invalid file type (code 64)"
         );
+
+        assert!(failed.is_permanent());
+        for code in [6, 71, 72] {
+            let json = format!(r#"{{"stat":"fail","code":{code}}}"#);
+            let err = parse_upload_response(200, &json).unwrap_err();
+            assert!(err.downcast_ref::<UploadFailed>().unwrap().is_permanent());
+        }
+        let err = parse_upload_response(200, r#"{"stat":"fail","code":5}"#).unwrap_err();
+        assert!(!err.downcast_ref::<UploadFailed>().unwrap().is_permanent());
 
         // Without a message, the whole reply is shown.
         let err = parse_upload_response(200, r#"{"stat":"fail"}"#).unwrap_err();

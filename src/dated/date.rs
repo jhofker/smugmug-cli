@@ -205,6 +205,27 @@ fn video_date(path: &Path) -> Option<NaiveDate> {
     quicktime_date(&moov)
 }
 
+fn quicktime_duration(moov: &[u8]) -> Option<std::time::Duration> {
+    let mvhd = find_box(moov, b"mvhd")?;
+    let (timescale, duration) = if *mvhd.first()? == 1 {
+        (
+            u32::from_be_bytes(mvhd.get(20..24)?.try_into().ok()?) as u64,
+            u64::from_be_bytes(mvhd.get(24..32)?.try_into().ok()?),
+        )
+    } else {
+        (
+            u32::from_be_bytes(mvhd.get(12..16)?.try_into().ok()?) as u64,
+            u32::from_be_bytes(mvhd.get(16..20)?.try_into().ok()?) as u64,
+        )
+    };
+    if timescale == 0 {
+        return None;
+    }
+    Some(std::time::Duration::from_secs_f64(
+        duration as f64 / timescale as f64,
+    ))
+}
+
 /// The date in a `moov` box's payload: Apple's local creation date if
 /// present, else the movie header's.
 fn quicktime_date(moov: &[u8]) -> Option<NaiveDate> {
@@ -226,11 +247,34 @@ fn quicktime_date(moov: &[u8]) -> Option<NaiveDate> {
     })
 }
 
+/// What walking a file's top-level boxes found.
+enum TopLevel {
+    Found(Vec<u8>),
+    /// Every box was read and none was the wanted one.
+    Absent,
+    /// Malformed, too big or unreadable: no conclusion.
+    Unknown,
+}
+
 /// Walk the file's top-level boxes (seeking past the media data) and return
 /// the payload of the first one of type `wanted`.
 fn read_top_level_box<R: Read + Seek>(reader: &mut R, wanted: &[u8; 4]) -> Option<Vec<u8>> {
+    match top_level_box(reader, wanted) {
+        TopLevel::Found(payload) => Some(payload),
+        _ => None,
+    }
+}
+
+fn top_level_box<R: Read + Seek>(reader: &mut R, wanted: &[u8; 4]) -> TopLevel {
+    top_level_box_inner(reader, wanted).unwrap_or(TopLevel::Unknown)
+}
+
+fn top_level_box_inner<R: Read + Seek>(reader: &mut R, wanted: &[u8; 4]) -> Option<TopLevel> {
     let len = reader.seek(SeekFrom::End(0)).ok()?;
     let mut pos = 0u64;
+    // Only a file that starts like a movie and has media data counts as
+    // lacking the box; anything else is no conclusion.
+    let (mut starts_with_ftyp, mut saw_mdat) = (false, false);
     while pos + 8 <= len {
         reader.seek(SeekFrom::Start(pos)).ok()?;
         let mut header = [0u8; 16];
@@ -247,6 +291,8 @@ fn read_top_level_box<R: Read + Seek>(reader: &mut R, wanted: &[u8; 4]) -> Optio
         if size < header_len {
             return None;
         }
+        starts_with_ftyp |= pos == 0 && &header[4..8] == b"ftyp";
+        saw_mdat |= &header[4..8] == b"mdat";
         if &header[4..8] == wanted {
             let payload = size - header_len;
             if payload > MAX_MOOV {
@@ -254,11 +300,62 @@ fn read_top_level_box<R: Read + Seek>(reader: &mut R, wanted: &[u8; 4]) -> Optio
             }
             let mut buf = vec![0u8; payload as usize];
             reader.read_exact(&mut buf).ok()?;
-            return Some(buf);
+            return Some(TopLevel::Found(buf));
         }
         pos = pos.checked_add(size)?;
     }
-    None
+    Some(if starts_with_ftyp && saw_mdat {
+        TopLevel::Absent
+    } else {
+        TopLevel::Unknown
+    })
+}
+
+/// A QuickTime/MP4 video, as far as its headers say.
+#[derive(Debug, Default, PartialEq)]
+pub struct VideoInfo {
+    /// Length, from the movie header.
+    pub duration: Option<std::time::Duration>,
+    /// The shorter side of the first video track, in pixels.
+    pub short_side: Option<u32>,
+    /// Media data but no `moov` box: a recording that was never finished
+    /// (power loss, pulled card), which nothing can play.
+    pub unfinished: bool,
+}
+
+/// `None` for files that aren't QuickTime/MP4 by extension or can't be read.
+pub fn video_info(path: &Path) -> Option<VideoInfo> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    if !matches!(ext.as_str(), "mov" | "mp4" | "m4v" | "3gp") {
+        return None;
+    }
+    let mut file = File::open(path).ok()?;
+    Some(match top_level_box(&mut file, b"moov") {
+        TopLevel::Found(moov) => VideoInfo {
+            duration: quicktime_duration(&moov),
+            short_side: quicktime_short_side(&moov),
+            unfinished: false,
+        },
+        TopLevel::Absent => VideoInfo {
+            unfinished: true,
+            ..VideoInfo::default()
+        },
+        TopLevel::Unknown => VideoInfo::default(),
+    })
+}
+
+/// Width and height sit in the last eight bytes of a `tkhd` (16.16 fixed
+/// point); audio tracks have none.
+fn quicktime_short_side(moov: &[u8]) -> Option<u32> {
+    boxes(moov)
+        .filter(|(t, _)| *t == b"trak")
+        .filter_map(|(_, trak)| find_box(trak, b"tkhd"))
+        .find_map(|tkhd| {
+            let tail = tkhd.get(tkhd.len().checked_sub(8)?..)?;
+            let width = u32::from_be_bytes(tail[..4].try_into().ok()?) >> 16;
+            let height = u32::from_be_bytes(tail[4..].try_into().ok()?) >> 16;
+            (width > 0 && height > 0).then_some(width.min(height))
+        })
 }
 
 /// Child boxes of a box payload: (type, payload).
@@ -570,6 +667,56 @@ mod tests {
         p.extend_from_slice(&((unix + QUICKTIME_EPOCH_OFFSET) as u32).to_be_bytes());
         p.extend_from_slice(&[0u8; 92]);
         mp4_box(b"mvhd", &p)
+    }
+
+    #[test]
+    fn duration_comes_from_the_movie_header() {
+        let mut p = vec![0u8; 4];
+        p.extend_from_slice(&[0u8; 8]); // created, modified
+        p.extend_from_slice(&600u32.to_be_bytes()); // timescale
+        p.extend_from_slice(&(600u32 * 90).to_be_bytes()); // duration
+        p.extend_from_slice(&[0u8; 80]);
+        let moov = mp4_box(b"mvhd", &p);
+        assert_eq!(quicktime_duration(&moov).unwrap().as_secs(), 90);
+        assert!(quicktime_duration(&[]).is_none());
+    }
+
+    fn trak(width: u32, height: u32) -> Vec<u8> {
+        let mut p = vec![0u8; 76];
+        p.extend_from_slice(&(width << 16).to_be_bytes());
+        p.extend_from_slice(&(height << 16).to_be_bytes());
+        mp4_box(b"trak", &mp4_box(b"tkhd", &p))
+    }
+
+    #[test]
+    fn short_side_skips_audio_tracks() {
+        let mut moov = trak(0, 0);
+        moov.extend(trak(1280, 236));
+        assert_eq!(quicktime_short_side(&moov), Some(236));
+        assert_eq!(quicktime_short_side(&trak(0, 0)), None);
+    }
+
+    #[test]
+    fn a_movie_without_moov_is_unfinished() {
+        let mut file = mp4_box(b"ftyp", b"isom\0\0\0\0");
+        file.extend(mp4_box(b"mdat", &[0u8; 100]));
+        assert!(matches!(
+            top_level_box(&mut Cursor::new(&file), b"moov"),
+            TopLevel::Absent
+        ));
+        file.extend(mp4_box(b"moov", &mvhd(1_400_000_000)));
+        assert!(matches!(
+            top_level_box(&mut Cursor::new(&file), b"moov"),
+            TopLevel::Found(_)
+        ));
+        // Garbage is no conclusion
+        assert!(matches!(
+            top_level_box(
+                &mut Cursor::new(&[0, 0, 0, 2, b'x', b'x', b'x', b'x']),
+                b"moov"
+            ),
+            TopLevel::Unknown
+        ));
     }
 
     fn apple_meta(value: &str) -> Vec<u8> {

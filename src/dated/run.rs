@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use crate::api::SmugMugClient;
 use crate::api::upload::{
-    FileUpload, UploadPayload, UploadRejected, UploadResult, UploadTarget, UploadTimedOut,
-    upload_bytes, upload_file,
+    FileUpload, UploadFailed, UploadPayload, UploadRejected, UploadResult, UploadTarget,
+    UploadTimedOut, upload_bytes, upload_file,
 };
 use crate::cache::hash_store::{HashStore, UploadedFile};
 use crate::config::{LivePhotoVideos, RawHandling};
@@ -62,6 +62,8 @@ pub struct RunOptions {
     pub raw_handling: RawHandling,
     pub live_photo_videos: LivePhotoVideos,
     pub retry_attempts: u32,
+    /// Longest video to send, in minutes (0: no limit).
+    pub max_video_minutes: u32,
     pub cache_path: PathBuf,
 }
 
@@ -235,6 +237,11 @@ enum Kind {
         size: u64,
     },
 }
+
+/// Videos with a shorter side under this many pixels came back "too small"
+/// (code 72) every time (352x200, 320x184, 1280x236, ...), while 320x260 was
+/// accepted. The real cutoff is somewhere in 237..=260.
+const MIN_VIDEO_SIDE: u32 = 237;
 
 /// A file read and classified, ready for the upload stage.
 struct Prepared {
@@ -638,6 +645,49 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
         }
     }
 
+    /// SmugMug's refusal for a video it would turn down, without sending it:
+    /// too long (code 71), too small (72) or unfinished (64).
+    fn video_refusal(&self, prepared: &Prepared) -> Option<anyhow::Error> {
+        let info = date::video_info(&prepared.file.path)?;
+        let limit = self.options.max_video_minutes;
+        let (code, message) = if info.unfinished {
+            (
+                64,
+                "unknown file type: no moov box, an unfinished recording; not sent".to_string(),
+            )
+        } else if let Some(length) = info
+            .duration
+            .filter(|l| limit > 0 && l.as_secs() > u64::from(limit) * 60)
+        {
+            (
+                71,
+                format!(
+                    "video too long: {} min, limit {} min; not sent",
+                    length.as_secs() / 60,
+                    limit
+                ),
+            )
+        } else if let Some(side) = info.short_side.filter(|s| *s < MIN_VIDEO_SIDE) {
+            (
+                72,
+                format!(
+                    "video too small: {} px on its short side, SmugMug refused every video under {} px; not sent",
+                    side, MIN_VIDEO_SIDE
+                ),
+            )
+        } else {
+            return None;
+        };
+        Some(
+            UploadFailed {
+                code: Some(code),
+                message: Some(message),
+                body: String::new(),
+            }
+            .into(),
+        )
+    }
+
     /// Upload or replace; the image it's now on SmugMug as, if it worked.
     async fn upload_one(&self, prepared: &Prepared) -> Option<UploadedFile> {
         let Kind::Upload {
@@ -649,6 +699,11 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
         else {
             return None;
         };
+
+        if let Some(error) = self.video_refusal(prepared) {
+            self.fail_with(prepared, &error);
+            return None;
+        }
 
         // Changed content at a path that was uploaded: replace its image,
         // unless another path is that image too.
@@ -834,7 +889,10 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
     fn fail_with(&self, prepared: &Prepared, error: &anyhow::Error) {
         let refused = error
             .downcast_ref::<UploadRejected>()
-            .is_some_and(UploadRejected::is_permanent);
+            .is_some_and(UploadRejected::is_permanent)
+            || error
+                .downcast_ref::<UploadFailed>()
+                .is_some_and(UploadFailed::is_permanent);
         if !refused {
             return self.fail(prepared, &format!("{:#}", error));
         }
@@ -1273,6 +1331,7 @@ mod tests {
                 raw_handling: RawHandling::Render,
                 live_photo_videos: LivePhotoVideos::Upload,
                 retry_attempts: 1,
+                max_video_minutes: 20,
                 cache_path: self.cache.path().join("db"),
             }
         }
@@ -1547,6 +1606,75 @@ mod tests {
         fs::write(&path, b"smaller").unwrap();
         set_mtime(&path, 10);
         assert_eq!(s.run().await.uploaded, 1);
+    }
+
+    /// A minimal QuickTime file `seconds` long.
+    fn movie(seconds: u32) -> Vec<u8> {
+        let mut mvhd = vec![0u8; 12];
+        mvhd.extend_from_slice(&1000u32.to_be_bytes());
+        mvhd.extend_from_slice(&(seconds * 1000).to_be_bytes());
+        mvhd.extend_from_slice(&[0u8; 80]);
+        let mut mvhd_box = ((mvhd.len() + 8) as u32).to_be_bytes().to_vec();
+        mvhd_box.extend_from_slice(b"mvhd");
+        mvhd_box.extend(mvhd);
+        let mut moov = ((mvhd_box.len() + 8) as u32).to_be_bytes().to_vec();
+        moov.extend_from_slice(b"moov");
+        moov.extend(mvhd_box);
+        moov
+    }
+
+    fn mp4_box(typ: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut b = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(typ);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    /// A `movie` with one video track of the given size.
+    fn movie_sized(width: u32, height: u32) -> Vec<u8> {
+        let mut moov = movie(5);
+        moov.truncate(moov.len());
+        let mut tkhd = vec![0u8; 76];
+        tkhd.extend_from_slice(&(width << 16).to_be_bytes());
+        tkhd.extend_from_slice(&(height << 16).to_be_bytes());
+        let trak = mp4_box(b"trak", &mp4_box(b"tkhd", &tkhd));
+        mp4_box(b"moov", &[&moov[8..], &trak[..]].concat())
+    }
+
+    #[tokio::test]
+    async fn small_and_unfinished_videos_are_refused_without_sending() {
+        let s = Setup::new();
+        s.write("VID_20140712_0001.mov", &movie_sized(320, 200));
+        s.write("VID_20140712_0002.mov", &movie_sized(1920, 1080));
+        let mut unfinished = mp4_box(b"ftyp", b"isom\0\0\0\0");
+        unfinished.extend(mp4_box(b"mdat", &[1u8; 64]));
+        s.write("VID_20140712_0003.mp4", &unfinished);
+        let stats = s.run().await;
+        assert_eq!(stats.refused, 2);
+        assert_eq!(stats.uploaded, 1);
+        assert_eq!(s.calls("upload"), 1);
+        let errors = stats.errors.join("\n");
+        assert!(errors.contains("video too small"), "{errors}");
+        assert!(errors.contains("unfinished recording"), "{errors}");
+    }
+
+    #[tokio::test]
+    async fn videos_over_the_limit_are_refused_without_sending() {
+        let s = Setup::new();
+        s.write("VID_20140712_0001.mov", &movie(21 * 60));
+        s.write("VID_20140712_0002.mov", &movie(60));
+        let stats = s.run().await;
+        assert_eq!(stats.refused, 1);
+        assert_eq!(stats.uploaded, 1);
+        assert_eq!(s.calls("upload"), 1);
+        assert!(stats.errors[0].contains("video too long"));
+
+        let stats = s.run().await;
+        assert_eq!(stats.previously_refused, 1);
+
+        let mut options = s.options();
+        options.max_video_minutes = 0;
+        assert_eq!(s.run_with(options).await.to_process, 0);
     }
 
     #[tokio::test]
