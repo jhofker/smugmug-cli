@@ -56,6 +56,7 @@ sm <command>
   - `albums.rs`: Album listing, creation, folder path handling
   - `images.rs`: Image metadata fetching; `search_images` (`image!search` scoped to the signed-in user) and `recent_images` (`user/<nick>!recentimages`) return `FoundImage`s, read with `get_pages` so `--limit` stops early
   - `comments.rs`: image and album comments (`CommentTarget`), the user's `!topkeywords`
+  - `profile.rs`: `user/<nick>!profile` (GET, PATCH) and `!bioimage`/`!coverimage` (read only: how to set them isn't known)
   - `upload.rs`: Image upload operations
 - **src/cache/**: Local deduplication using sled embedded database
   - `hash_store.rs`: SHA256 hash storage mapping to uploaded file metadata
