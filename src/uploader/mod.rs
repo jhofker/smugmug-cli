@@ -165,7 +165,12 @@ pub fn select_raw_files(
     let kept = files
         .into_iter()
         .filter(|f| {
-            if !crate::scanner::is_raw_file(f) {
+            if !crate::scanner::is_renderable(f) {
+                return true;
+            }
+            // TIFFs and BMPs are only converted when rendering; skipping
+            // RAWs doesn't skip them.
+            if crate::scanner::is_convertible_image(f) && handling != RawHandling::Render {
                 return true;
             }
             match handling {

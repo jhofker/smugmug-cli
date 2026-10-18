@@ -1,6 +1,6 @@
 [package]
 name = "smugmug-cli"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Jordan Hofker <jhofker@gmail.com>"]
@@ -89,7 +89,7 @@ rawler = "0.8"
 little_exif = "0.6"
 # Capture dates from JPEG/HEIC/PNG/TIFF EXIF (src/dated/date.rs)
 kamadak-exif = "0.6"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "tiff", "bmp"] }
 
 [dev-dependencies]
 mockito = "1.7"

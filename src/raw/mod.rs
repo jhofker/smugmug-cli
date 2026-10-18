@@ -39,14 +39,53 @@ pub fn rendered_file_name(path: &Path) -> String {
     format!("{}.jpg", stem)
 }
 
-/// Render the RAW file at `path` to a JPEG (see the module docs).
-pub fn render_jpeg(path: &Path) -> Result<RenderedJpeg> {
-    let data = std::fs::read(path)?;
-    render_jpeg_bytes(&data)
-}
-
 /// JPEG quality for RAW files converted with `rawler`.
 const CONVERTED_JPEG_QUALITY: u8 = 92;
+
+/// Render the file at `path`, whose content is `data`: converted if it's a
+/// TIFF or BMP, otherwise treated as a RAW file.
+pub fn render_file_bytes(path: &Path, data: &[u8]) -> Result<RenderedJpeg> {
+    if crate::scanner::is_convertible_image(path) {
+        convert_image_bytes(data)
+    } else {
+        render_jpeg_bytes(data)
+    }
+}
+
+/// Render the file at `path`, any that `scanner::is_renderable` accepts.
+pub fn render_file(path: &Path) -> Result<RenderedJpeg> {
+    let data = std::fs::read(path)?;
+    render_file_bytes(path, &data)
+}
+
+/// Convert a TIFF or BMP to JPEG. Multi-page TIFFs give their first page;
+/// 16-bit images are reduced to 8 bits and transparency is dropped, since
+/// JPEG has neither. A TIFF's EXIF (capture date, camera, orientation) is
+/// copied into the JPEG.
+pub fn convert_image_bytes(data: &[u8]) -> Result<RenderedJpeg> {
+    use image::codecs::jpeg::JpegEncoder;
+
+    // Decoders for unusual files can panic; that's a failed file, not a
+    // failed upload run.
+    let mut out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<u8>> {
+        let rgb = image::load_from_memory(data)
+            .context("Failed to decode image")?
+            .into_rgb8();
+        let mut out = Vec::new();
+        JpegEncoder::new_with_quality(&mut out, CONVERTED_JPEG_QUALITY).encode_image(&rgb)?;
+        Ok(out)
+    }))
+    .map_err(|_| anyhow!("the image decoder crashed on this file"))??;
+
+    if let Some(exif) = exif::read_raw(data).filter(|e| !e.is_empty()) {
+        let mut with_exif = out.clone();
+        if exif.write_into_jpeg(&mut with_exif).is_ok() {
+            out = with_exif;
+        }
+    }
+
+    Ok(RenderedJpeg { data: out })
+}
 
 pub fn render_jpeg_bytes(data: &[u8]) -> Result<RenderedJpeg> {
     let mut out = match embedded_preview(data) {
@@ -173,6 +212,49 @@ mod tests {
 
         let rendered = render_jpeg_bytes(&raw).unwrap();
         assert_eq!(rendered.data, full);
+    }
+
+    fn encoded(format: image::ImageFormat, image: image::DynamicImage) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut out, format).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn converts_tiff_and_bmp_to_jpeg() {
+        let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            64,
+            48,
+            image::Rgb([200, 100, 50]),
+        ));
+        // 16-bit and transparent sources are reduced to plain RGB.
+        let rgba16 = image::DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(
+            64,
+            48,
+            image::Rgba([60000u16, 30000, 10000, 65535]),
+        ));
+        for (format, source) in [
+            (image::ImageFormat::Tiff, rgb.clone()),
+            (image::ImageFormat::Tiff, rgba16),
+            (image::ImageFormat::Bmp, rgb),
+        ] {
+            let converted = convert_image_bytes(&encoded(format, source)).unwrap();
+            let found = jpeg::find_jpegs(&converted.data);
+            assert_eq!(found.len(), 1);
+            assert_eq!((found[0].width, found[0].height), (64, 48));
+        }
+        assert!(convert_image_bytes(b"not an image").is_err());
+    }
+
+    #[test]
+    fn render_file_bytes_dispatches_on_extension() {
+        let bmp = encoded(
+            image::ImageFormat::Bmp,
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)),
+        );
+        assert!(render_file_bytes(Path::new("scan.BMP"), &bmp).is_ok());
+        // Not a RAW file, so it takes the RAW path and fails there.
+        assert!(render_file_bytes(Path::new("scan.cr2"), &bmp).is_err());
     }
 
     #[test]

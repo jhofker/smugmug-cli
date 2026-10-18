@@ -259,6 +259,11 @@ GPS, orientation) copied in. Things to know:
   contents. Uploads by date compare the rendered JPEG instead, so a metadata-only edit to a
   RAW (a DNG whose embedded XMP changed) isn't uploaded again.
 
+**TIFF and BMP files:** SmugMug refuses these without Source too, so under the same `raw_mode`
+rules they're converted to JPEG (quality 92, first page of a multi-page TIFF, 8-bit RGB without
+transparency, TIFF EXIF kept) and uploaded as `<name>.jpg`. `raw_mode = "skip"` still uploads
+them as they are. CMYK TIFFs can't be decoded and are listed as failed.
+
 Set `raw_mode` in the config (or pass `--raw`) to change this: `render` always uploads JPEGs,
 `original` uploads RAW originals (skipped without Source), `skip` leaves RAW files out.
 

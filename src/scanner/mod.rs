@@ -77,6 +77,23 @@ pub fn is_raw_file(path: &Path) -> bool {
     )
 }
 
+/// TIFF and BMP files, which SmugMug refuses without the Source add-on
+/// (as it does RAWs) and which are converted to JPEG like RAWs are.
+pub fn is_convertible_image(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .as_deref(),
+        Some("tif" | "tiff" | "bmp")
+    )
+}
+
+/// Files that are rendered to JPEG instead of uploaded when RAW handling is
+/// `Render`: RAWs and convertible images.
+pub fn is_renderable(path: &Path) -> bool {
+    is_raw_file(path) || is_convertible_image(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

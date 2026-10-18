@@ -59,7 +59,7 @@ pub async fn upload_worker(
     context: Arc<UploadWorkerContext>,
 ) -> Result<UploadStatus> {
     let is_raw = crate::scanner::is_raw_file(file_path);
-    let render = is_raw && context.render_raw;
+    let render = context.render_raw && crate::scanner::is_renderable(file_path);
 
     // Check if this is a RAW original and RAW uploads were found not to work
     if is_raw
@@ -191,10 +191,10 @@ async fn upload_rendered_raw(
     // Rendering reads the whole RAW file and scans it, so keep it off the
     // async runtime's threads.
     let path = file_path.to_path_buf();
-    let rendered = tokio::task::spawn_blocking(move || crate::raw::render_jpeg(&path))
+    let rendered = tokio::task::spawn_blocking(move || crate::raw::render_file(&path))
         .await
         .with_context(|| "RAW rendering task failed")?
-        .with_context(|| "Failed to render RAW file to JPEG")?;
+        .with_context(|| "Failed to render file to JPEG")?;
 
     if let Some(remote_md5s) = &context.remote_md5s
         && remote_md5s.contains_key(&format!("{:x}", md5::compute(&rendered.data)))
@@ -813,7 +813,7 @@ mod tests {
     async fn test_rendered_raw_dry_run_reports_jpeg_size() {
         let (context, dir) = render_context(&[]);
         let path = write_fake_raw(dir.path(), "IMG_1.NEF");
-        let expected = crate::raw::render_jpeg(&path).unwrap().data.len() as u64;
+        let expected = crate::raw::render_file(&path).unwrap().data.len() as u64;
 
         match upload_worker(&path, context).await.unwrap() {
             UploadStatus::DryRun { file_size } => assert_eq!(file_size, expected),
