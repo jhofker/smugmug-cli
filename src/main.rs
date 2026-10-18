@@ -2534,6 +2534,7 @@ async fn main() -> Result<()> {
                     .live_photo_videos
                     .unwrap_or(cfg.upload.live_photo_videos),
                 retry_attempts: cfg.upload.retry_attempts,
+                max_video_minutes: cfg.upload.max_video_minutes,
                 cache_path: upload_cache_dir()?,
             };
             let client = std::sync::Arc::new(api::SmugMugClient::new(
@@ -2607,6 +2608,7 @@ async fn main() -> Result<()> {
                     raw_handling: raw_mode.handling(cfg.upload.has_smugmug_source),
                     live_photo_videos: cfg.upload.live_photo_videos,
                     retry_attempts: cfg.upload.retry_attempts,
+                    max_video_minutes: cfg.upload.max_video_minutes,
                     cache_path: upload_cache_dir()?,
                 };
                 println!("Uploading from: {}", path);
