@@ -559,6 +559,10 @@ enum AlbumCommands {
         /// Download another user's public album (their nickname)
         #[arg(short, long, value_name = "NICKNAME")]
         user: Option<String>,
+        /// Download photos in this size instead of as uploaded (e.g. x4-large
+        /// for a 2048 px web copy); videos still download as uploaded
+        #[arg(long, value_enum)]
+        size: Option<downloader::ImageSize>,
     },
 
     /// Show folder/album tree structure
@@ -818,9 +822,21 @@ enum ImageCommands {
         #[arg(long)]
         title: Option<String>,
 
-        /// Set keywords (semicolon-separated)
-        #[arg(long)]
+        /// Set keywords (semicolon-separated), replacing the old ones
+        #[arg(long, conflicts_with_all = ["add_keyword", "remove_keyword"])]
         keywords: Option<String>,
+
+        /// Add a keyword, keeping the others (repeat for several)
+        #[arg(long)]
+        add_keyword: Vec<String>,
+
+        /// Remove a keyword, keeping the others (repeat for several)
+        #[arg(long)]
+        remove_keyword: Vec<String>,
+
+        /// Hide the image in its album, or show it again (true/false)
+        #[arg(long, value_name = "BOOL")]
+        hidden: Option<bool>,
 
         /// Set latitude
         #[arg(long)]
@@ -1091,6 +1107,7 @@ async fn main() -> Result<()> {
                     output,
                     threads,
                     user,
+                    size,
                 } => {
                     println!("Downloading album: {}", album);
                     println!("Output directory: {}", output);
@@ -1127,6 +1144,7 @@ async fn main() -> Result<()> {
                         output_dir: std::path::PathBuf::from(output),
                         client,
                         threads,
+                        size,
                     };
 
                     match downloader::download_album(download_options).await {
@@ -1786,6 +1804,9 @@ async fn main() -> Result<()> {
                     caption,
                     title,
                     keywords,
+                    add_keyword,
+                    remove_keyword,
+                    hidden,
                     latitude,
                     longitude,
                 } => {
@@ -1838,15 +1859,33 @@ async fn main() -> Result<()> {
                     if caption.is_none()
                         && title.is_none()
                         && keywords.is_none()
+                        && add_keyword.is_empty()
+                        && remove_keyword.is_empty()
+                        && hidden.is_none()
                         && latitude.is_none()
                         && longitude.is_none()
                     {
                         println!("\n✗ No metadata fields specified to update");
-                        println!(
-                            "  Use --caption, --title, --keywords, --latitude, or --longitude"
-                        );
+                        println!("  See 'sm images update --help' for the fields you can change");
                         return Ok(());
                     }
+
+                    // Adding or removing keywords starts from the current ones.
+                    let keyword_array = if add_keyword.is_empty() && remove_keyword.is_empty() {
+                        None
+                    } else {
+                        match client.get_image_details(&image_key).await {
+                            Ok(details) => Some(api::images::edit_keywords(
+                                details.keywords.as_deref().unwrap_or(""),
+                                &add_keyword,
+                                &remove_keyword,
+                            )),
+                            Err(e) => {
+                                println!("\n✗ Failed to read the image's keywords: {}", e);
+                                return Ok(());
+                            }
+                        }
+                    };
 
                     // Show current image info
                     println!("\nImage details:");
@@ -1866,6 +1905,12 @@ async fn main() -> Result<()> {
                     if let Some(ref k) = keywords {
                         println!("  Keywords: {}", k);
                     }
+                    if let Some(ref k) = keyword_array {
+                        println!("  Keywords: {}", k.join("; "));
+                    }
+                    if let Some(h) = hidden {
+                        println!("  Hidden: {}", if h { "yes" } else { "no" });
+                    }
                     if let Some(lat) = latitude {
                         println!("  Latitude: {}", lat);
                     }
@@ -1880,6 +1925,8 @@ async fn main() -> Result<()> {
                         keywords,
                         latitude,
                         longitude,
+                        hidden,
+                        keyword_array,
                     };
 
                     println!("\nUpdating image metadata...");

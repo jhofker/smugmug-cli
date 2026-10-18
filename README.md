@@ -342,6 +342,7 @@ sm sort Backup --folders-by name --recursive
 - `sm albums download <ALBUM> [OPTIONS]` - Download all images from an album
   - `--output <DIR>` - Output directory (default: current directory)
   - `--threads <N>` - Number of concurrent download threads (default: 4)
+  - `--size <SIZE>` - Download photos in a SmugMug size instead of as uploaded: tiny, thumb, small, medium, large, x-large (1024 px), x2-large (1280), x3-large (1600), x4-large (2048), x5-large (2560), 4k (3840), 5k (5120) or original. Resized copies keep the file name with the extension SmugMug gives them (usually .jpg). Videos download as uploaded, and photos smaller than the size come at their largest size
 - `sm albums tree` - Show folder/album tree structure
 - `sm albums settings <ALBUM> [OPTIONS]` - Update album settings
   - `--privacy <LEVEL>` - Set privacy (public, unlisted, private)
@@ -390,7 +391,9 @@ Folders and albums are given as paths of names from the top of your account, e.g
 - `sm images update <ALBUM> <IMAGE_KEY> [OPTIONS]` - Update image metadata
   - `--caption <TEXT>` - Set image caption
   - `--title <TEXT>` - Set image title
-  - `--keywords <KEYWORDS>` - Set keywords (semicolon-separated)
+  - `--keywords <KEYWORDS>` - Set keywords (semicolon-separated), replacing the old ones
+  - `--add-keyword <KEYWORD>` / `--remove-keyword <KEYWORD>` - Add or remove one keyword, keeping the rest (repeatable)
+  - `--hidden <BOOL>` - Hide the image in its album, or show it again
   - `--latitude <LAT>` - Set latitude
   - `--longitude <LON>` - Set longitude
 - `sm images move <SOURCE_ALBUM> <IMAGE_KEY> <TARGET_ALBUM>` - Move image to a different album
