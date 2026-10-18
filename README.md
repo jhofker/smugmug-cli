@@ -216,6 +216,7 @@ interval = "6h"
   - `--check-remote` - Check SmugMug for existing files by MD5 hash (slower but more reliable)
   - `--no-cache` - Disable local cache (always check files, even if previously uploaded)
   - `--raw <MODE>` - How to handle RAW files (`auto`, `render`, `original`, `skip`), overriding `raw_mode` in the config
+- `sm upload --album <NAME> --url <URL>` - Have SmugMug fetch a photo or video from a public URL straight into the album (repeatable; works with `--parent` and `--dry-run`). The file never passes through your machine, so the local cache can't skip duplicates
 
 **Where files go:** with no `--album`, each file goes into a private album for the day it was
 taken, `YEAR/MONTH/YEAR-MONTH-DAY` (e.g. `Uploads/2014/07/2014-07-12`), inside the

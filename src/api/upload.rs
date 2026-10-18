@@ -71,6 +71,60 @@ pub async fn upload_image(
     send_upload(client, "X-Smug-AlbumUri", album_uri, payload).await
 }
 
+/// Have SmugMug fetch a photo or video from a public `url` into the album
+/// itself (`POST album/<key>!uploadfromuri`), so the file never passes
+/// through this machine. `file_name` names it in the album. Returns the new
+/// image's URI when SmugMug's answer includes one.
+pub async fn upload_from_uri(
+    client: &crate::api::SmugMugClient,
+    album_key: &str,
+    url: &str,
+    file_name: Option<&str>,
+) -> Result<Option<String>> {
+    upload_from_uri_at(
+        client,
+        &format!(
+            "https://api.smugmug.com/api/v2/album/{}!uploadfromuri",
+            album_key
+        ),
+        url,
+        file_name,
+    )
+    .await
+}
+
+async fn upload_from_uri_at(
+    client: &crate::api::SmugMugClient,
+    endpoint: &str,
+    url: &str,
+    file_name: Option<&str>,
+) -> Result<Option<String>> {
+    let mut body = serde_json::json!({ "Uri": url });
+    if let Some(file_name) = file_name {
+        body["FileName"] = serde_json::json!(file_name);
+    }
+    let response = client.post_with_auth(endpoint, body).await?;
+    let status = response.status();
+    let body_text = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("SmugMug refused the URL: {} - {}", status, body_text);
+    }
+    Ok(serde_json::from_str::<serde_json::Value>(&body_text)
+        .ok()
+        .and_then(|body| uploaded_image_uri(&body["Response"])))
+}
+
+/// The image URI in an `!uploadfromuri` answer. Its exact shape isn't
+/// documented, so this takes the `Uri` of whichever image object is there.
+fn uploaded_image_uri(response: &serde_json::Value) -> Option<String> {
+    ["Image", "AlbumImage"]
+        .iter()
+        .filter_map(|locator| response[locator]["Uri"].as_str())
+        .chain(response["Uri"].as_str())
+        .find(|uri| uri.contains("/image/"))
+        .map(str::to_string)
+}
+
 /// Replace the file content of an existing image, identified by its image URI
 /// (e.g. `/api/v2/image/<key>`). This uploads new bytes onto the existing
 /// image record, keeping its album placement, keywords, and other metadata,
@@ -1022,5 +1076,67 @@ mod tests {
         // Attempting to read a non-existent file should fail
         let result = fs::read(non_existent_path).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn upload_from_uri_sends_the_url_and_reads_the_image() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v2/album/ALB!uploadfromuri")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "Uri": "https://example.com/a.jpg",
+                "FileName": "a.jpg"
+            })))
+            .with_status(200)
+            .with_body(r#"{"Response":{"AlbumImage":{"Uri":"/api/v2/album/ALB/image/K-0"}}}"#)
+            .create_async()
+            .await;
+
+        let uri = upload_from_uri_at(
+            &client,
+            &format!("{}/api/v2/album/ALB!uploadfromuri", server.url()),
+            "https://example.com/a.jpg",
+            Some("a.jpg"),
+        )
+        .await
+        .unwrap();
+        mock.assert_async().await;
+        assert_eq!(uri.as_deref(), Some("/api/v2/album/ALB/image/K-0"));
+    }
+
+    #[tokio::test]
+    async fn upload_from_uri_reports_refusals() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/v2/album/ALB!uploadfromuri")
+            .with_status(400)
+            .with_body(r#"{"Code":400,"Message":"Bad Request"}"#)
+            .create_async()
+            .await;
+        let err = upload_from_uri_at(
+            &client,
+            &format!("{}/api/v2/album/ALB!uploadfromuri", server.url()),
+            "https://example.com/missing.jpg",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("400"), "{}", err);
+    }
+
+    #[test]
+    fn uploaded_image_uri_takes_any_image_object() {
+        let r = |v: serde_json::Value| uploaded_image_uri(&v);
+        assert_eq!(
+            r(serde_json::json!({"Image": {"Uri": "/api/v2/image/K-0"}})).as_deref(),
+            Some("/api/v2/image/K-0")
+        );
+        assert_eq!(
+            r(serde_json::json!({"Uri": "/api/v2/album/ALB!uploadfromuri"})),
+            None
+        );
+        assert_eq!(r(serde_json::json!({})), None);
     }
 }
