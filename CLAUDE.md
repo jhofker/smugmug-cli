@@ -54,7 +54,7 @@ sm <command>
 - **src/api/**: SmugMug API client with OAuth 1.0a authentication
   - `mod.rs`: Core client with OAuth header building (`build_oauth_header`)
   - `albums.rs`: Album listing, creation, folder path handling
-  - `images.rs`: Image metadata fetching
+  - `images.rs`: Image metadata fetching; `search_images` (`image!search` scoped to the signed-in user) and `recent_images` (`user/<nick>!recentimages`) return `FoundImage`s, read with `get_pages` so `--limit` stops early
   - `upload.rs`: Image upload operations
 - **src/cache/**: Local deduplication using sled embedded database
   - `hash_store.rs`: SHA256 hash storage mapping to uploaded file metadata
@@ -77,6 +77,7 @@ sm <command>
   - `mod.rs`: uses the largest embedded preview (≥1600 px long edge); otherwise converts the RAW data with `rawler` (LGPL-2.1, see THIRD-PARTY-NOTICES.md), one conversion at a time behind a mutex because each needs hundreds of MB
   - `jpeg.rs`: finds embedded JPEG previews by walking the file for well-formed JPEG streams (rejects lossless SOF3 streams, which are sensor data in CR2/DNG)
   - `exif.rs`: reads IFD0/EXIF/GPS from TIFF-based RAWs and CR3 `CMT1/2/4` boxes (formats `little_exif` doesn't parse) and writes them into the JPEG with `little_exif`
+- **src/api/taken.rs**: capture times as SmugMug stores them (camera clock read as US Pacific time, see Collecting below); used by `sm images search --taken-from/--taken-to` and to print dates taken
 - **src/config.rs`: Configuration management (TOML file + environment variables)
 
 ### Authentication Flow
@@ -106,6 +107,8 @@ Single-album uploads (and each day in dated uploads) go into an album series (`u
 RAW files follow `upload.raw_mode` / `--raw` (`RawMode::handling` turns it into upload, render or skip given `has_smugmug_source`). `uploader::select_raw_files` runs before upload and drops RAWs that would render to the same name as a JPEG/HEIC next to them. Rendered RAWs are cached under the RAW file's SHA-256, uploaded as `<stem>.jpg`, and skipped (not replaced) when that name is already in the album. Rendering runs in `spawn_blocking`; preview extraction is deterministic, but don't rely on MD5 matches across versions of this code or its dependencies.
 
 SmugMug list endpoints (`!albums`, `!images`, `!comments`, `!children`, ...) return one page per request (often 100 items, sometimes 50) with the next page in `Response.Pages.NextPage`. Read lists through `SmugMugClient::get_all_pages(url, locator)`, which follows every page; a single `get_with_auth` on a list endpoint silently drops everything after the first page. (The `!children` lookups in `albums.rs` page by hand so they can stop as soon as they find a match; `list_children` reads them all.) `auth_user()` caches the signed-in user's nickname and root node per client.
+
+To check an endpoint's parameters or field names without an account, request it with `Accept: text/html` (e.g. `curl -H 'Accept: text/html' 'https://api.smugmug.com/api/v2/album/SJT3DX'`): SmugMug's Live API Browser answers without credentials, and the page embeds the JSON response with `Options` (parameters, types, allowed values) even for a 400. Owner-only fields and links (an image's `WebUri` and `ImageAlbum`) are missing from these anonymous views. `image!search` takes `Scope` (required), `Text`, `Keywords` (one, or a JSON array), `DateTakenStart`/`End`, `DateUploadedStart`/`End`, `Type` (Image/Video), `SortMethod` (DateTaken/DateUploaded/Popular, default Popular), `SortDirection`, `Relevance`.
 
 SmugMug's Library ("All Media") would be the natural default destination, but its endpoints (`upload.smugmug.com/api/v2/library`, `/api/v2/library!assets`) return 404 to OAuth API keys as of 2026-09; `api::upload::upload_to_library` and the hidden `debug` commands are kept for when that changes.
 

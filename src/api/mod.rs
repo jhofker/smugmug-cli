@@ -7,6 +7,7 @@ pub mod albums;
 pub mod comments;
 pub mod images;
 pub mod oauth_flow;
+pub mod taken;
 pub mod upload;
 
 #[derive(Debug)]
@@ -250,6 +251,17 @@ impl SmugMugClient {
         first_url: &str,
         locator: &str,
     ) -> Result<Vec<T>> {
+        self.get_pages(first_url, locator, None).await
+    }
+
+    /// Like `get_all_pages`, but stops once it has `limit` items (when
+    /// given), so a long listing isn't read in full to show its start.
+    pub async fn get_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        first_url: &str,
+        locator: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<T>> {
         let mut parsed = reqwest::Url::parse(first_url)?;
         let origin = parsed.origin().ascii_serialization();
         // The first URL's own query parameters are signed separately too.
@@ -296,6 +308,12 @@ impl SmugMugClient {
             if let Some(array) = response_data.get_mut(locator).map(Value::take) {
                 let page_items: Vec<T> = serde_json::from_value(array)?;
                 items.extend(page_items);
+            }
+            if let Some(limit) = limit
+                && items.len() >= limit
+            {
+                items.truncate(limit);
+                break;
             }
 
             next = response_data["Pages"]["NextPage"]

@@ -72,6 +72,104 @@ struct ImageDetailsResponseData {
     image: ImageDetails,
 }
 
+/// An image as `image!search` and `user/<nick>!recentimages` return it.
+#[derive(Debug, Deserialize, Clone)]
+pub struct FoundImage {
+    #[serde(rename = "ImageKey")]
+    pub image_key: String,
+    #[serde(rename = "FileName", default)]
+    pub file_name: String,
+    #[serde(rename = "WebUri", default)]
+    pub web_uri: Option<String>,
+    /// When the photo was taken, as SmugMug stores it (see `api::taken`).
+    #[serde(rename = "DateTimeOriginal", default)]
+    pub date_time_original: Option<String>,
+    #[serde(rename = "Uris", default)]
+    pub uris: Option<FoundImageUris>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct FoundImageUris {
+    /// The album the image was uploaded to.
+    #[serde(rename = "ImageAlbum", default)]
+    pub image_album: Option<super::albums::UriRef>,
+}
+
+impl FoundImage {
+    /// Key of the album the image was uploaded to.
+    pub fn album_key(&self) -> Option<&str> {
+        let uri = &self.uris.as_ref()?.image_album.as_ref()?.uri;
+        uri.rsplit('/').next().filter(|key| !key.is_empty())
+    }
+
+    /// When the photo was taken, by the camera's clock.
+    pub fn taken(&self) -> Option<chrono::NaiveDateTime> {
+        let stored = chrono::DateTime::parse_from_rfc3339(self.date_time_original.as_deref()?)
+            .ok()?
+            .to_utc();
+        Some(super::taken::camera_time(stored))
+    }
+}
+
+/// What `search_images` looks for. Every field given must match.
+#[derive(Debug, Default, Clone)]
+pub struct ImageSearch {
+    /// Words in any text field (title, caption, keywords, file name).
+    pub text: Option<String>,
+    /// Keywords the images are tagged with.
+    pub keywords: Vec<String>,
+    /// Taken at or after this instant (as SmugMug stores it).
+    pub taken_start: Option<chrono::DateTime<chrono::Utc>>,
+    /// Taken at or before this instant.
+    pub taken_end: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ImageSearch {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_none()
+            && self.keywords.is_empty()
+            && self.taken_start.is_none()
+            && self.taken_end.is_none()
+    }
+
+    fn params(&self, scope: &str) -> Vec<(&'static str, String)> {
+        let format = |t: &chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let mut params = vec![("Scope", scope.to_string())];
+        if let Some(text) = &self.text {
+            params.push(("Text", text.clone()));
+        }
+        // One keyword as is, several as a JSON array.
+        match self.keywords.as_slice() {
+            [] => {}
+            [keyword] => params.push(("Keywords", keyword.clone())),
+            keywords => params.push(("Keywords", serde_json::to_string(keywords).unwrap())),
+        }
+        if let Some(start) = &self.taken_start {
+            params.push(("DateTakenStart", format(start)));
+        }
+        if let Some(end) = &self.taken_end {
+            params.push(("DateTakenEnd", format(end)));
+        }
+        // SmugMug defaults to "Popular". A date range reads best oldest
+        // first; otherwise show the newest first. Text searches still put
+        // relevant results ahead (`Relevance` defaults to true).
+        let date_range = self.taken_start.is_some() || self.taken_end.is_some();
+        params.push(("SortMethod", "DateTaken".to_string()));
+        params.push((
+            "SortDirection",
+            if date_range {
+                "Ascending"
+            } else {
+                "Descending"
+            }
+            .to_string(),
+        ));
+        params
+    }
+}
+
+pub const IMAGE_SEARCH_URL: &str = "https://api.smugmug.com/api/v2/image!search";
+
 /// SmugMug's answer to a `collect_images` call.
 #[derive(Debug, Default, PartialEq)]
 pub struct CollectResult {
@@ -176,6 +274,39 @@ impl SmugMugClient {
         }
 
         Ok(())
+    }
+
+    /// Images of the signed-in user matching `search`, at most `limit`
+    /// (all with `None`). `image!search` returns 100 per page; newly
+    /// uploaded images take a few minutes to show up.
+    pub async fn search_images(
+        &self,
+        search: &ImageSearch,
+        limit: Option<usize>,
+    ) -> Result<Vec<FoundImage>> {
+        let scope = format!("/api/v2/user/{}", self.auth_user().await?.nickname);
+        self.search_images_at(IMAGE_SEARCH_URL, &scope, search, limit)
+            .await
+    }
+
+    async fn search_images_at(
+        &self,
+        search_url: &str,
+        scope: &str,
+        search: &ImageSearch,
+        limit: Option<usize>,
+    ) -> Result<Vec<FoundImage>> {
+        let url = reqwest::Url::parse_with_params(search_url, search.params(scope))?;
+        self.get_pages(url.as_str(), "Image", limit).await
+    }
+
+    /// The signed-in user's most recently uploaded images, newest first.
+    pub async fn recent_images(&self, limit: Option<usize>) -> Result<Vec<FoundImage>> {
+        let url = format!(
+            "https://api.smugmug.com/api/v2/user/{}!recentimages",
+            self.auth_user().await?.nickname
+        );
+        self.get_pages(&url, "Image", limit).await
     }
 
     /// Add existing images (Image or AlbumImage URIs) to the album, without
@@ -1115,5 +1246,115 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("400"));
+    }
+
+    #[tokio::test]
+    async fn test_search_images_sends_filters_and_stops_at_limit() {
+        let client = create_test_client();
+        let mut server = mockito::Server::new_async().await;
+        let first = server
+            .mock("GET", "/api/v2/image!search")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("Scope".into(), "/api/v2/user/me".into()),
+                mockito::Matcher::UrlEncoded("Text".into(), "beach day".into()),
+                mockito::Matcher::UrlEncoded("Keywords".into(), "sunset".into()),
+                mockito::Matcher::UrlEncoded(
+                    "DateTakenStart".into(),
+                    "2026-05-01T07:00:00Z".into(),
+                ),
+                mockito::Matcher::UrlEncoded("DateTakenEnd".into(), "2026-05-02T06:59:59Z".into()),
+                mockito::Matcher::UrlEncoded("SortMethod".into(), "DateTaken".into()),
+                mockito::Matcher::UrlEncoded("SortDirection".into(), "Ascending".into()),
+            ]))
+            .with_status(200)
+            .with_body(
+                r#"{"Response":{"Image":[
+                    {"ImageKey":"A","FileName":"a.jpg","WebUri":"https://x/i-A",
+                     "DateTimeOriginal":"2026-05-01T19:00:00+00:00",
+                     "Uris":{"ImageAlbum":{"Uri":"/api/v2/album/ALB1"}}}],
+                  "Pages":{"NextPage":"/api/v2/image!search?start=2&count=1"}}}"#,
+            )
+            .create_async()
+            .await;
+        let second = server
+            .mock("GET", "/api/v2/image!search")
+            .match_query(mockito::Matcher::UrlEncoded("start".into(), "2".into()))
+            .with_status(200)
+            .with_body(
+                r#"{"Response":{"Image":[{"ImageKey":"B","FileName":"b.jpg"},{"ImageKey":"C"}],
+                  "Pages":{"NextPage":"/api/v2/image!search?start=4&count=2"}}}"#,
+            )
+            .create_async()
+            .await;
+        // Never asked for: the limit is reached on the second page.
+        let third = server
+            .mock("GET", "/api/v2/image!search")
+            .match_query(mockito::Matcher::UrlEncoded("start".into(), "4".into()))
+            .expect(0)
+            .create_async()
+            .await;
+
+        let day = |end| {
+            let bound = super::super::taken::parse_bound("2026-05-01", end).unwrap();
+            let (earliest, latest) = super::super::taken::stored_span(bound);
+            if end { latest } else { earliest }
+        };
+        let search = ImageSearch {
+            text: Some("beach day".into()),
+            keywords: vec!["sunset".into()],
+            taken_start: Some(day(false)),
+            taken_end: Some(day(true)),
+        };
+        let images = client
+            .search_images_at(
+                &format!("{}/api/v2/image!search", server.url()),
+                "/api/v2/user/me",
+                &search,
+                Some(2),
+            )
+            .await
+            .unwrap();
+
+        first.assert_async().await;
+        second.assert_async().await;
+        third.assert_async().await;
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].album_key(), Some("ALB1"));
+        assert_eq!(
+            images[0].taken().unwrap().to_string(),
+            "2026-05-01 12:00:00"
+        );
+        assert_eq!(images[0].web_uri.as_deref(), Some("https://x/i-A"));
+        assert_eq!(images[1].file_name, "b.jpg");
+        assert_eq!(images[1].album_key(), None);
+        assert_eq!(images[1].taken(), None);
+    }
+
+    #[test]
+    fn test_image_search_leaves_out_unset_filters() {
+        let search = ImageSearch {
+            text: Some("cat".into()),
+            ..Default::default()
+        };
+        assert!(!search.is_empty());
+        assert!(ImageSearch::default().is_empty());
+        assert_eq!(
+            search.params("/api/v2/user/me"),
+            vec![
+                ("Scope", "/api/v2/user/me".to_string()),
+                ("Text", "cat".to_string()),
+                ("SortMethod", "DateTaken".to_string()),
+                ("SortDirection", "Descending".to_string()),
+            ]
+        );
+
+        let search = ImageSearch {
+            keywords: vec!["cat".into(), "dog \"rex\"".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            search.params("/api/v2/user/me")[1],
+            ("Keywords", r#"["cat","dog \"rex\""]"#.to_string())
+        );
     }
 }
