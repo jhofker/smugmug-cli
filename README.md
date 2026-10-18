@@ -411,11 +411,13 @@ Folders and albums are given as paths of names from the top of your account, e.g
   - `--longitude <LON>` - Set longitude
 - `sm images move <SOURCE_ALBUM> <IMAGE_KEY> <TARGET_ALBUM>` - Move image to a different album
   - `--force` - Force move without confirmation
+- `sm images keywords` - Your most used keywords, most used first
+  - `--count <N>` - How many (1 to 2000)
 
 ### Comments
 
-- `sm comments list <ALBUM> <IMAGE_KEY>` - List comments on an image
-- `sm comments create <ALBUM> <IMAGE_KEY> [OPTIONS]` - Create a new comment on an image
+- `sm comments list <ALBUM> [IMAGE_KEY]` - List comments on an album, or on one of its images
+- `sm comments create <ALBUM> [IMAGE_KEY] [OPTIONS]` - Comment on an album, or on one of its images
   - `--text <TEXT>` - Comment text (required)
   - `--name <NAME>` - Commenter name
   - `--email <EMAIL>` - Commenter email

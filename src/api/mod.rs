@@ -344,12 +344,32 @@ impl SmugMugClient {
     }
 
     pub async fn get_with_auth(&self, url: &str) -> Result<reqwest::Response> {
+        // A `?query` in the URL is signed and sent as parameters: the OAuth
+        // signer won't take a URL with one.
+        let (base, params) = match url.split_once('?') {
+            Some((base, _)) => {
+                let params: Vec<(String, String)> = reqwest::Url::parse(url)?
+                    .query_pairs()
+                    .into_owned()
+                    .collect();
+                (base, params)
+            }
+            None => (url, Vec::new()),
+        };
         self.send_retrying(true, || {
-            let oauth_header = self.build_oauth_header("GET", url);
+            let oauth_header = self.build_oauth_header_with_query(
+                "GET",
+                base,
+                &oauth::ParameterList::new(params.clone()),
+            );
             let mut headers = HeaderMap::new();
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&oauth_header)?);
             headers.insert("Accept", HeaderValue::from_static("application/json"));
-            Ok(self.client.get(url).headers(headers))
+            let mut request = self.client.get(base).headers(headers);
+            if !params.is_empty() {
+                request = request.query(&params);
+            }
+            Ok(request)
         })
         .await
     }
