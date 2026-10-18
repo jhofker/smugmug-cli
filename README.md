@@ -358,8 +358,20 @@ sm sort Backup --folders-by name --recursive
   - `--watermark <NAME>` - Watermark new uploads with one of your watermarks, or `none` to stop
 - `sm albums share <ALBUM>` - Make an album unlisted (viewable by anyone with the link) and print its link
 - `sm albums watermarks` - List your watermarks
+- `sm albums move <ALBUM_PATH> <FOLDER_PATH>` - Move an album into another folder (paths of names, e.g. `Trips/Paris`; `/` is the top of your account)
 - `sm albums get-download-link <ALBUM>` - Get album download link (ZIP file)
   - `--wait` - Wait for download generation (polls until ready)
+
+### Folders
+
+Folders and albums are given as paths of names from the top of your account, e.g. `Trips/2026`.
+
+- `sm folders rename <PATH> <NEW_NAME>` - Rename a folder or album
+  - `--url-name <NAME>` - Also change its part of the web address (links to the old address stop working)
+- `sm folders move <PATH> <DESTINATION>` - Move a folder into another folder (`/` for the top of your account)
+- `sm folders cover <PATH> <IMAGE_KEY>` - Set the photo that represents a folder or album
+- `sm folders delete <PATH>` - Delete a folder and everything in it, after showing what's inside and asking
+  - `--force` - Delete without asking
 
 ### Images
 

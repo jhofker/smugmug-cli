@@ -4,6 +4,8 @@ pub mod cache;
 pub mod config;
 pub mod dated;
 pub mod downloader;
+pub mod nodes;
+pub mod organize;
 pub mod raw;
 pub mod scanner;
 pub mod sort;
