@@ -106,6 +106,13 @@ pub fn print_summary(stats: &RunStats, options: &RunOptions) {
             stats.captioned
         );
     }
+    if stats.caption_failed > 0 {
+        println!(
+            "  {}: {}",
+            "Captions that failed (retried next run)".yellow(),
+            stats.caption_failed
+        );
+    }
     if stats.linked > 0 {
         println!("  {}: {}", "Already there (copies)".cyan(), stats.linked);
     }
