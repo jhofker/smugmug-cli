@@ -255,6 +255,10 @@ enum Kind {
     /// A RAW file whose rendered JPEG (MD5 `md5`) is what this path
     /// uploaded last time.
     SameRender { md5: String },
+    /// A RAW, TIFF or BMP file that can't be rendered to JPEG (why). Not
+    /// retried until the file changes: reading it again fails the same way,
+    /// after reading it whole.
+    Unrenderable(String),
     /// Content already on SmugMug.
     Known(UploadedFile),
     Upload {
@@ -384,9 +388,19 @@ fn prepare(pending: PendingFile, ctx: &ReadContext) -> Result<Prepared> {
         } else if let Some(cached) = known(&sha256)? {
             Kind::Known(cached)
         } else {
-            let rendered = crate::raw::render_file_bytes(&file.path, &data)
-                .context("Failed to render file to JPEG")?
-                .data;
+            let rendered = match crate::raw::render_file_bytes(&file.path, &data) {
+                Ok(rendered) => rendered.data,
+                Err(e) => {
+                    return Ok(Prepared {
+                        file,
+                        previous,
+                        sha256,
+                        date,
+                        date_source,
+                        kind: Kind::Unrenderable(format!("Failed to render file to JPEG: {e:#}")),
+                    });
+                }
+            };
             let md5 = format!("{:x}", md5::compute(&rendered));
             let same_render = previous.as_ref().is_some_and(|r| {
                 r.image_uri.is_some() && r.uploaded_md5.as_deref() == Some(md5.as_str())
@@ -471,6 +485,17 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
     async fn handle(&self, prepared: Prepared) {
         self.stats().dated(prepared.date, prepared.date_source);
         match &prepared.kind {
+            Kind::Unrenderable(reason) => {
+                self.log_failure(
+                    &prepared.file.path,
+                    &format!("{reason} (not retried until the file changes)"),
+                );
+                let record = prepared.record(None, None, None, Some(reason.clone()));
+                self.put(&prepared, &record);
+                let mut stats = self.stats();
+                stats.refused += 1;
+                stats.error(&prepared.file.path, reason);
+            }
             Kind::Same => {
                 let mut record = prepared.previous.clone().expect("Same needs a record");
                 record.size = prepared.file.size;
@@ -1564,6 +1589,24 @@ mod tests {
         drop(calls);
 
         assert_eq!(setup.run_with(with_captions()).await.captioned, 0);
+    }
+
+    #[tokio::test]
+    async fn a_file_that_cant_be_rendered_is_not_retried_until_it_changes() {
+        let setup = Setup::new();
+        let path = setup.write("2014/broken.dng", b"not a raw file");
+
+        let first = setup.run().await;
+        assert_eq!((first.refused, first.failed, first.uploaded), (1, 0, 0));
+        assert_eq!(setup.calls("upload"), 0);
+
+        let second = setup.run().await;
+        assert_eq!((second.to_process, second.previously_refused), (0, 1));
+
+        // Changed: tried again
+        fs::write(&path, b"still not a raw file, but different").unwrap();
+        let third = setup.run().await;
+        assert_eq!((third.to_process, third.refused), (1, 1));
     }
 
     #[tokio::test]
