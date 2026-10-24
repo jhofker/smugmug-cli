@@ -68,7 +68,14 @@ pub fn convert_image_bytes(data: &[u8]) -> Result<RenderedJpeg> {
     // Decoders for unusual files can panic; that's a failed file, not a
     // failed upload run.
     let mut out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Vec<u8>> {
-        let rgb = image::load_from_memory(data)
+        // The default decoder allocation limit (512 MiB) refuses stitched
+        // panoramas; conversions run one at a time, so no limit is fine.
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+            .with_guessed_format()
+            .context("Failed to decode image")?;
+        reader.no_limits();
+        let rgb = reader
+            .decode()
             .context("Failed to decode image")?
             .into_rgb8();
         let mut out = Vec::new();

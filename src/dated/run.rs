@@ -100,6 +100,8 @@ pub struct RunStats {
     pub failed: usize,
     /// Images uploaded earlier that got their file's path as a caption.
     pub captioned: usize,
+    /// Images whose caption couldn't be set (retried next run).
+    pub caption_failed: usize,
     /// Refused by SmugMug (too big, unsupported); not retried until the
     /// file changes.
     pub refused: usize,
@@ -995,27 +997,63 @@ fn progress_bar(len: u64) -> ProgressBar {
     bar
 }
 
-/// Set the caption of images uploaded before captions were recorded, a few
-/// at a time. Failures are left for the next run.
+/// An image whose caption needs setting: the paths of the files it is.
+struct CaptionJob {
+    image_uri: String,
+    paths: Vec<PathBuf>,
+}
+
+/// The caption for an image: where its file, or its identical copies, came
+/// from.
+fn caption_for(paths: &[PathBuf]) -> String {
+    let mut paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    paths.sort();
+    paths.join("\n")
+}
+
+/// Set the caption of images uploaded before captions were recorded (or
+/// that gained another identical copy since), a few at a time. Failures are
+/// left for the next run. Returns how many were set and how many failed.
 async fn caption_existing<T: Uploads>(
     smug: &T,
     index: &FileIndex,
-    images: Vec<(PathBuf, String)>,
+    jobs: Vec<CaptionJob>,
     options: &RunOptions,
     stop: &StopFlag,
-) -> usize {
+    stats: &std::sync::Mutex<RunStats>,
+) -> (usize, usize) {
     use futures_util::StreamExt;
-    futures_util::stream::iter(images)
-        .map(|(path, uri)| async move {
+    futures_util::stream::iter(jobs)
+        .map(|job| async move {
             if stop.load(Ordering::Relaxed) {
-                return false;
+                return None;
             }
-            let caption = path.display().to_string();
-            smug.set_caption(&uri, &caption).await.is_ok() && index.mark_captioned(&path).is_ok()
+            let result = smug
+                .set_caption(&job.image_uri, &caption_for(&job.paths))
+                .await;
+            Some(match result {
+                Ok(()) => job
+                    .paths
+                    .iter()
+                    .try_for_each(|p| index.mark_captioned(p))
+                    .map_err(|e| (job.image_uri, e)),
+                Err(e) => Err((job.image_uri, e)),
+            })
         })
         .buffer_unordered(options.upload_threads.max(1))
-        .filter(|done| std::future::ready(*done))
-        .count()
+        .fold((0, 0), |(done, failed), outcome| async move {
+            match outcome {
+                Some(Ok(())) => (done + 1, failed),
+                Some(Err((uri, e))) => {
+                    stats
+                        .lock()
+                        .unwrap()
+                        .error(Path::new(&uri), format!("couldn't set caption: {:#}", e));
+                    (done, failed + 1)
+                }
+                None => (done, failed),
+            }
+        })
         .await
 }
 
@@ -1048,14 +1086,15 @@ pub async fn run<T: Smug + Uploads + CollectBackend>(
     stats.live_photo_videos_skipped = scanned.live_photo_videos_skipped;
 
     // Leave out files the index knows are unchanged.
-    let (pending, unchanged, previously_refused, uncaptioned) = {
+    let (pending, unchanged, previously_refused, caption_jobs) = {
         let index = index.clone();
         let no_cache = options.no_cache;
         let caption_source = options.caption_source && !options.dry_run;
         let files = scanned.files;
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut pending = VecDeque::new();
-            let mut uncaptioned = Vec::new();
+            // image URI -> (paths, any of them not captioned yet)
+            let mut images: HashMap<String, (Vec<PathBuf>, bool)> = HashMap::new();
             let (mut unchanged, mut refused) = (0, 0);
             for file in files {
                 let previous = if no_cache {
@@ -1069,28 +1108,36 @@ pub async fn run<T: Smug + Uploads + CollectBackend>(
                         if r.failed.is_some() {
                             refused += 1;
                         }
-                        // Uploaded before captions were set; an image shared
-                        // by identical copies has no single source path.
-                        if caption_source
-                            && !r.captioned
-                            && let Some(uri) = &r.image_uri
-                            && index.refs(uri)? == 1
-                        {
-                            uncaptioned.push((file.path.clone(), uri.clone()));
+                        // Uploaded before captions were set, or a copy was
+                        // added since: the caption lists every copy.
+                        if caption_source && let Some(uri) = &r.image_uri {
+                            let entry = images.entry(uri.clone()).or_default();
+                            entry.0.push(file.path.clone());
+                            entry.1 |= !r.captioned;
                         }
                     }
                     _ => pending.push_back(PendingFile { file, previous }),
                 }
             }
-            Ok((pending, unchanged, refused, uncaptioned))
+            let jobs: Vec<CaptionJob> = images
+                .into_iter()
+                .filter(|(_, (_, stale))| *stale)
+                .map(|(image_uri, (paths, _))| CaptionJob { image_uri, paths })
+                .collect();
+            Ok((pending, unchanged, refused, jobs))
         })
         .await??
     };
     stats.unchanged = unchanged;
     stats.previously_refused = previously_refused;
     stats.to_process = pending.len();
-    if !uncaptioned.is_empty() {
-        stats.captioned = caption_existing(smug.as_ref(), &index, uncaptioned, options, stop).await;
+    if !caption_jobs.is_empty() {
+        let shared = std::sync::Mutex::new(std::mem::take(&mut stats));
+        let (done, failed) =
+            caption_existing(smug.as_ref(), &index, caption_jobs, options, stop, &shared).await;
+        stats = shared.into_inner().unwrap();
+        stats.captioned = done;
+        stats.caption_failed = failed;
     }
     stats.bytes_to_process = pending.iter().map(|p| p.file.size).sum();
 
@@ -1495,6 +1542,28 @@ mod tests {
         let third = setup.run_with(with_captions).await;
         assert_eq!(third.captioned, 0);
         assert_eq!(setup.calls("caption"), 1);
+    }
+
+    #[tokio::test]
+    async fn identical_copies_share_one_caption_listing_every_path() {
+        let setup = Setup::new();
+        let a = setup.write("one/a.jpg", b"same photo");
+        let b = setup.write("two/a.jpg", b"same photo");
+        setup.run().await;
+
+        let with_captions = || RunOptions {
+            caption_source: true,
+            ..setup.options()
+        };
+        let stats = setup.run_with(with_captions()).await;
+        assert_eq!(stats.captioned, 1);
+        let calls = setup.smug.calls.lock().unwrap().clone();
+        let caption = calls.iter().find(|c| c.starts_with("caption")).unwrap();
+        assert!(caption.contains(&a.display().to_string()), "{caption}");
+        assert!(caption.contains(&b.display().to_string()), "{caption}");
+        drop(calls);
+
+        assert_eq!(setup.run_with(with_captions()).await.captioned, 0);
     }
 
     #[tokio::test]

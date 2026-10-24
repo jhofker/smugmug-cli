@@ -235,6 +235,17 @@ pub(crate) struct BatchOutcome {
     pub(crate) failed: Vec<Pending>,
 }
 
+/// The URIs of `files`, each once: identical copies of a file share an
+/// image, and SmugMug answers a repeated URI with a 400 ("duplicate uri").
+fn unique_uris<'a>(files: impl IntoIterator<Item = &'a Pending>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    files
+        .into_iter()
+        .filter(|p| seen.insert(p.image_uri.as_str()))
+        .map(|p| p.image_uri.clone())
+        .collect()
+}
+
 /// Collect one batch into `album`, recording each collected file in the
 /// cache.
 pub(crate) async fn collect_batch<C: CollectBackend>(
@@ -243,7 +254,7 @@ pub(crate) async fn collect_batch<C: CollectBackend>(
     store: &HashStore,
     backend: &C,
 ) -> BatchOutcome {
-    let uris: Vec<String> = batch.iter().map(|p| p.image_uri.clone()).collect();
+    let uris = unique_uris(&batch);
     let (mut good, refused) = match backend.collect(&album.album_key, &uris).await {
         Ok(result) => batch
             .into_iter()
@@ -268,7 +279,7 @@ pub(crate) async fn collect_batch<C: CollectBackend>(
     // collected the others; collecting them again settles it.
     let mut failed = Vec::new();
     if !refused.is_empty() && !good.is_empty() {
-        let uris: Vec<String> = good.iter().map(|p| p.image_uri.clone()).collect();
+        let uris = unique_uris(&good);
         match backend.collect(&album.album_key, &uris).await {
             Ok(result) if result.rejected.is_empty() => {}
             outcome => {
@@ -615,6 +626,31 @@ mod tests {
             per_album,
             vec![("key-Trip".to_string(), 1), ("key-Trip (2)".to_string(), 2)]
         );
+    }
+
+    #[tokio::test]
+    async fn test_copies_of_one_image_are_collected_once() {
+        let backend = FakeSmugMug::default();
+        let store =
+            HashStore::new(tempfile::TempDir::new().unwrap().keep().to_str().unwrap()).unwrap();
+        let pending = |path: &str, hash: &str| Pending {
+            path: PathBuf::from(path),
+            hash: hash.to_string(),
+            file_size: 1,
+            image_uri: "/api/v2/image/AAA-0".to_string(),
+            image_key: "AAA-0".to_string(),
+        };
+        let outcome = collect_batch(
+            vec![pending("/a.jpg", "h1"), pending("/b.jpg", "h2")],
+            &album("Day"),
+            &store,
+            &backend,
+        )
+        .await;
+        assert_eq!(outcome.collected, 2);
+        let collects = backend.collects.lock().unwrap();
+        assert_eq!(collects.len(), 1);
+        assert_eq!(collects[0].1, vec!["/api/v2/image/AAA-0".to_string()]);
     }
 
     #[tokio::test]
