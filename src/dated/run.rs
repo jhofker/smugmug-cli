@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::SmugMugClient;
+use crate::api::images::ImageMetadataUpdate;
 use crate::api::upload::{
     FileUpload, UploadFailed, UploadPayload, UploadRejected, UploadResult, UploadTarget,
     UploadTimedOut, upload_bytes, upload_file,
@@ -65,6 +66,9 @@ pub struct RunOptions {
     /// Longest video to send, in minutes (0: no limit).
     pub max_video_minutes: u32,
     pub cache_path: PathBuf,
+    /// Record each new image's original path as its caption, to tell where
+    /// it came from.
+    pub caption_source: bool,
 }
 
 /// How a run went. Serialized as the backup's `last_run.json`.
@@ -94,6 +98,8 @@ pub struct RunStats {
     /// Already on SmugMug in another album; added to its day album.
     pub collected: usize,
     pub failed: usize,
+    /// Images uploaded earlier that got their file's path as a caption.
+    pub captioned: usize,
     /// Refused by SmugMug (too big, unsupported); not retried until the
     /// file changes.
     pub refused: usize,
@@ -149,7 +155,11 @@ pub trait Uploads {
         size: u64,
         md5: &str,
         name: &str,
+        caption: Option<&str>,
     ) -> Result<UploadResult>;
+
+    /// Set an image's caption.
+    async fn set_caption(&self, image_uri: &str, caption: &str) -> Result<()>;
 
     /// The root folder's node URI, created if `create` (else `None` when
     /// missing).
@@ -162,6 +172,18 @@ pub trait Uploads {
 }
 
 impl Uploads for SmugMugClient {
+    async fn set_caption(&self, image_uri: &str, caption: &str) -> Result<()> {
+        let key = image_uri.rsplit('/').next().unwrap_or(image_uri);
+        self.update_image_metadata(
+            key,
+            ImageMetadataUpdate {
+                caption: Some(caption.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     async fn upload(
         &self,
         target: UploadTarget<'_>,
@@ -170,6 +192,7 @@ impl Uploads for SmugMugClient {
         size: u64,
         md5: &str,
         name: &str,
+        caption: Option<&str>,
     ) -> Result<UploadResult> {
         match content {
             Content::File => {
@@ -181,6 +204,7 @@ impl Uploads for SmugMugClient {
                         size,
                         md5_hex: md5,
                         file_name: name,
+                        caption,
                     },
                 )
                 .await
@@ -193,6 +217,7 @@ impl Uploads for SmugMugClient {
                         data: data.clone(),
                         file_name: name.to_string(),
                         mime_type: "image/jpeg".to_string(),
+                        caption: caption.map(str::to_string),
                     },
                 )
                 .await
@@ -271,6 +296,7 @@ impl Prepared {
             image_uri,
             album_key,
             failed,
+            captioned: false,
         }
     }
 
@@ -809,12 +835,13 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
                     .await;
                 let cached = prepared.uploaded_file(&result.image_uri, &album.album_key, *size);
                 let _ = self.store.insert_deferred(&prepared.sha256, &cached);
-                let record = prepared.record(
+                let mut record = prepared.record(
                     Some(md5.clone()),
                     Some(result.image_uri),
                     Some(album.album_key.clone()),
                     None,
                 );
+                record.captioned = self.options.caption_source;
                 self.put(prepared, &record);
                 let mut stats = self.stats();
                 stats.uploaded += 1;
@@ -842,10 +869,21 @@ impl<T: Smug + Uploads + CollectBackend> Workers<'_, T> {
     ) -> Result<UploadResult> {
         let attempts = self.options.retry_attempts.max(1);
         let mut attempt = 1;
+        // A replaced image keeps the caption it has.
+        let caption = (self.options.caption_source && matches!(target, UploadTarget::Album(_)))
+            .then(|| prepared.file.path.display().to_string());
         loop {
             match self
                 .smug
-                .upload(target, &prepared.file.path, content, size, md5, name)
+                .upload(
+                    target,
+                    &prepared.file.path,
+                    content,
+                    size,
+                    md5,
+                    name,
+                    caption.as_deref(),
+                )
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -957,6 +995,30 @@ fn progress_bar(len: u64) -> ProgressBar {
     bar
 }
 
+/// Set the caption of images uploaded before captions were recorded, a few
+/// at a time. Failures are left for the next run.
+async fn caption_existing<T: Uploads>(
+    smug: &T,
+    index: &FileIndex,
+    images: Vec<(PathBuf, String)>,
+    options: &RunOptions,
+    stop: &StopFlag,
+) -> usize {
+    use futures_util::StreamExt;
+    futures_util::stream::iter(images)
+        .map(|(path, uri)| async move {
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            let caption = path.display().to_string();
+            smug.set_caption(&uri, &caption).await.is_ok() && index.mark_captioned(&path).is_ok()
+        })
+        .buffer_unordered(options.upload_threads.max(1))
+        .filter(|done| std::future::ready(*done))
+        .count()
+        .await
+}
+
 /// Run once over `options.sources`.
 pub async fn run<T: Smug + Uploads + CollectBackend>(
     smug: Arc<T>,
@@ -986,12 +1048,14 @@ pub async fn run<T: Smug + Uploads + CollectBackend>(
     stats.live_photo_videos_skipped = scanned.live_photo_videos_skipped;
 
     // Leave out files the index knows are unchanged.
-    let (pending, unchanged, previously_refused) = {
+    let (pending, unchanged, previously_refused, uncaptioned) = {
         let index = index.clone();
         let no_cache = options.no_cache;
+        let caption_source = options.caption_source && !options.dry_run;
         let files = scanned.files;
         tokio::task::spawn_blocking(move || -> Result<_> {
             let mut pending = VecDeque::new();
+            let mut uncaptioned = Vec::new();
             let (mut unchanged, mut refused) = (0, 0);
             for file in files {
                 let previous = if no_cache {
@@ -1005,17 +1069,29 @@ pub async fn run<T: Smug + Uploads + CollectBackend>(
                         if r.failed.is_some() {
                             refused += 1;
                         }
+                        // Uploaded before captions were set; an image shared
+                        // by identical copies has no single source path.
+                        if caption_source
+                            && !r.captioned
+                            && let Some(uri) = &r.image_uri
+                            && index.refs(uri)? == 1
+                        {
+                            uncaptioned.push((file.path.clone(), uri.clone()));
+                        }
                     }
                     _ => pending.push_back(PendingFile { file, previous }),
                 }
             }
-            Ok((pending, unchanged, refused))
+            Ok((pending, unchanged, refused, uncaptioned))
         })
         .await??
     };
     stats.unchanged = unchanged;
     stats.previously_refused = previously_refused;
     stats.to_process = pending.len();
+    if !uncaptioned.is_empty() {
+        stats.captioned = caption_existing(smug.as_ref(), &index, uncaptioned, options, stop).await;
+    }
     stats.bytes_to_process = pending.iter().map(|p| p.file.size).sum();
 
     if pending.is_empty() {
@@ -1219,6 +1295,14 @@ mod tests {
     use tempfile::TempDir;
 
     impl Uploads for FakeSmug {
+        async fn set_caption(&self, image_uri: &str, caption: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("caption {} {}", image_uri, caption));
+            Ok(())
+        }
+
         async fn upload(
             &self,
             target: UploadTarget<'_>,
@@ -1227,6 +1311,7 @@ mod tests {
             size: u64,
             md5: &str,
             name: &str,
+            _caption: Option<&str>,
         ) -> Result<UploadResult> {
             if self.refuse.lock().unwrap().contains(name) {
                 return Err(UploadRejected {
@@ -1333,6 +1418,7 @@ mod tests {
                 retry_attempts: 1,
                 max_video_minutes: 20,
                 cache_path: self.cache.path().join("db"),
+                caption_source: false,
             }
         }
 
@@ -1372,6 +1458,43 @@ mod tests {
         let file = fs::File::options().write(true).open(path).unwrap();
         file.set_modified(SystemTime::now() - Duration::from_secs(secs_ago))
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn captions_earlier_uploads_once() {
+        let setup = Setup::new();
+        let path = setup.write("2014/a.jpg", b"first photo");
+
+        // Uploaded before captions were recorded
+        let first = setup.run().await;
+        assert_eq!((first.uploaded, first.captioned), (1, 0));
+        assert_eq!(setup.calls("caption"), 0);
+
+        let with_captions = RunOptions {
+            caption_source: true,
+            ..setup.options()
+        };
+        let second = setup.run_with(with_captions).await;
+        assert_eq!(second.captioned, 1);
+        assert_eq!(setup.calls(&format!("caption")), 1);
+        assert!(
+            setup
+                .smug
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.ends_with(&path.display().to_string()))
+        );
+
+        // Not again
+        let with_captions = RunOptions {
+            caption_source: true,
+            ..setup.options()
+        };
+        let third = setup.run_with(with_captions).await;
+        assert_eq!(third.captioned, 0);
+        assert_eq!(setup.calls("caption"), 1);
     }
 
     #[tokio::test]

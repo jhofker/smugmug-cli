@@ -99,6 +99,13 @@ pub fn print_summary(stats: &RunStats, options: &RunOptions) {
     if stats.replaced > 0 {
         println!("  {}: {}", "Replaced (edited)".cyan(), stats.replaced);
     }
+    if stats.captioned > 0 {
+        println!(
+            "  {}: {}",
+            "Captioned (uploaded earlier)".cyan(),
+            stats.captioned
+        );
+    }
     if stats.linked > 0 {
         println!("  {}: {}", "Already there (copies)".cyan(), stats.linked);
     }

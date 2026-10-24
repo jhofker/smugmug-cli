@@ -42,6 +42,9 @@ pub struct FileRecord {
     /// until the file changes.
     #[serde(rename = "f", default, skip_serializing_if = "Option::is_none")]
     pub failed: Option<String>,
+    /// The image's caption has been set to this file's path.
+    #[serde(rename = "c", default, skip_serializing_if = "std::ops::Not::not")]
+    pub captioned: bool,
 }
 
 impl FileRecord {
@@ -129,6 +132,16 @@ impl FileIndex {
         Ok(())
     }
 
+    /// Record `path` as having its image's caption set (a no-op when the
+    /// path has no record).
+    pub fn mark_captioned(&self, path: &Path) -> Result<()> {
+        if let Some(mut record) = self.get(path)? {
+            record.captioned = true;
+            self.put(path, &record)?;
+        }
+        Ok(())
+    }
+
     /// Number of indexed files.
     #[cfg(test)]
     fn len(&self) -> usize {
@@ -153,6 +166,7 @@ mod tests {
             image_uri: uri.map(String::from),
             album_key: None,
             failed: None,
+            captioned: false,
         }
     }
 

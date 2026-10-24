@@ -41,6 +41,8 @@ pub struct UploadPayload {
     pub data: bytes::Bytes,
     pub file_name: String,
     pub mime_type: String,
+    /// Recorded as the image's caption (`X-Smug-Caption`).
+    pub caption: Option<String>,
 }
 
 impl UploadPayload {
@@ -59,6 +61,7 @@ impl UploadPayload {
             data,
             file_name,
             mime_type,
+            caption: None,
         })
     }
 }
@@ -265,6 +268,7 @@ async fn send_upload(
         &md5_base64,
         &payload.mime_type,
         &payload.file_name,
+        payload.caption.as_deref(),
     )?;
     let data = payload.data.clone();
     let chunks = futures_util::stream::iter(
@@ -303,6 +307,8 @@ pub struct FileUpload<'a> {
     pub md5_hex: &'a str,
     /// Name SmugMug records (usually the file's own).
     pub file_name: &'a str,
+    /// Recorded as the image's caption (`X-Smug-Caption`).
+    pub caption: Option<&'a str>,
 }
 
 /// Upload a file from disk, streaming its contents.
@@ -327,6 +333,7 @@ pub async fn upload_file(
         &general_purpose::STANDARD.encode(md5),
         &mime_type,
         file.file_name,
+        file.caption,
     )?;
     let reader = fs::File::open(file.path).await?;
     let chunks = tokio_util::io::ReaderStream::with_capacity(reader, UPLOAD_CHUNK);
@@ -470,6 +477,7 @@ fn upload_headers(
     md5_base64: &str,
     mime_type: &str,
     filename: &str,
+    caption: Option<&str>,
 ) -> Result<HeaderMap> {
     let oauth_header = client.build_oauth_header("POST", UPLOAD_URL);
     let mut headers = HeaderMap::new();
@@ -480,6 +488,9 @@ fn upload_headers(
     headers.insert(target_header, HeaderValue::from_str(target_uri)?);
     headers.insert("X-Smug-FileName", header_text(filename)?);
     headers.insert("X-Smug-Title", header_text(filename)?);
+    if let Some(caption) = caption {
+        headers.insert("X-Smug-Caption", header_text(caption)?);
+    }
     headers.insert("X-Smug-ResponseType", HeaderValue::from_static("JSON"));
     headers.insert("X-Smug-Version", HeaderValue::from_static("v2"));
     headers.insert("Accept", HeaderValue::from_static("application/json"));
@@ -674,6 +685,38 @@ mod tests {
             .await;
 
         // In a properly architected version, we'd inject the upload URL and test the actual call
+    }
+
+    #[test]
+    fn caption_header_carries_utf8_path() {
+        let client = create_test_client();
+        let headers = upload_headers(
+            &client,
+            "X-Smug-AlbumUri",
+            "/api/v2/album/ABC123",
+            1,
+            "AAAA",
+            "image/jpeg",
+            "a.jpg",
+            Some("/Volumes/Fotos/Zürich/a.jpg"),
+        )
+        .unwrap();
+        assert_eq!(
+            headers["x-smug-caption"].as_bytes(),
+            "/Volumes/Fotos/Zürich/a.jpg".as_bytes()
+        );
+        let headers = upload_headers(
+            &client,
+            "X-Smug-AlbumUri",
+            "/api/v2/album/ABC123",
+            1,
+            "AAAA",
+            "image/jpeg",
+            "a.jpg",
+            None,
+        )
+        .unwrap();
+        assert!(!headers.contains_key("x-smug-caption"));
     }
 
     #[tokio::test]
