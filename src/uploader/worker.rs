@@ -206,6 +206,7 @@ async fn upload_rendered_raw(
         data: rendered.data.into(),
         file_name,
         mime_type: "image/jpeg".to_string(),
+        caption: None,
     };
     let file_size = payload.data.len() as u64;
 

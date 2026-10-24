@@ -2516,6 +2516,11 @@ async fn main() -> Result<()> {
                     .transpose()?
             };
             let raw_mode = raw.unwrap_or(cfg.upload.raw_mode);
+            // Absolute, since each image's caption records where it came from
+            let sources = sources
+                .into_iter()
+                .map(|s| std::path::absolute(&s).unwrap_or(s))
+                .collect();
             let options = dated::RunOptions {
                 sources,
                 excludes: backup.exclude.iter().cloned().chain(excludes).collect(),
@@ -2536,6 +2541,7 @@ async fn main() -> Result<()> {
                 retry_attempts: cfg.upload.retry_attempts,
                 max_video_minutes: cfg.upload.max_video_minutes,
                 cache_path: upload_cache_dir()?,
+                caption_source: true,
             };
             let client = std::sync::Arc::new(api::SmugMugClient::new(
                 cfg.auth.api_key,
@@ -2610,6 +2616,7 @@ async fn main() -> Result<()> {
                     retry_attempts: cfg.upload.retry_attempts,
                     max_video_minutes: cfg.upload.max_video_minutes,
                     cache_path: upload_cache_dir()?,
+                    caption_source: false,
                 };
                 println!("Uploading from: {}", path);
                 println!(
