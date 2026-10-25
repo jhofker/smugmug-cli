@@ -106,6 +106,13 @@ pub fn print_summary(stats: &RunStats, options: &RunOptions) {
             stats.captioned
         );
     }
+    if stats.vanished > 0 {
+        println!(
+            "  {}: {}",
+            "Images SmugMug no longer has (files not re-sent)".yellow(),
+            stats.vanished
+        );
+    }
     if stats.caption_failed > 0 {
         println!(
             "  {}: {}",

@@ -179,6 +179,27 @@ pub struct CollectResult {
     pub rejected: HashMap<String, Vec<String>>,
 }
 
+/// SmugMug refused an image metadata update. A 404 means the image is gone.
+#[derive(Debug, thiserror::Error)]
+#[error("Failed to update image metadata: {} - {body}", self.status_text())]
+pub struct ImageMetadataRejected {
+    pub status: u16,
+    pub body: String,
+}
+
+impl ImageMetadataRejected {
+    fn status_text(&self) -> String {
+        reqwest::StatusCode::from_u16(self.status)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| self.status.to_string())
+    }
+
+    /// The image doesn't exist (any more).
+    pub fn is_gone(&self) -> bool {
+        self.status == 404
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ImageMetadataUpdate {
     pub caption: Option<String>,
@@ -326,11 +347,11 @@ impl SmugMugClient {
         let body_text = response.text().await?;
 
         if !status.is_success() {
-            anyhow::bail!(
-                "Failed to update image metadata: {} - {}",
-                status,
-                body_text
-            );
+            return Err(ImageMetadataRejected {
+                status: status.as_u16(),
+                body: body_text,
+            }
+            .into());
         }
 
         Ok(())

@@ -142,6 +142,19 @@ impl FileIndex {
         Ok(())
     }
 
+    /// Record that `path`'s image is no longer on SmugMug, so it isn't
+    /// uploaded again until the file changes (a no-op without a record).
+    pub fn mark_gone(&self, path: &Path, reason: &str) -> Result<()> {
+        if let Some(mut record) = self.get(path)? {
+            record.image_uri = None;
+            record.album_key = None;
+            record.captioned = false;
+            record.failed = Some(reason.to_string());
+            self.put(path, &record)?;
+        }
+        Ok(())
+    }
+
     /// Number of indexed files.
     #[cfg(test)]
     fn len(&self) -> usize {
