@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::SmugMugClient;
-use crate::api::images::ImageMetadataUpdate;
+use crate::api::images::{ImageMetadataRejected, ImageMetadataUpdate};
 use crate::api::upload::{
     FileUpload, UploadFailed, UploadPayload, UploadRejected, UploadResult, UploadTarget,
     UploadTimedOut, upload_bytes, upload_file,
@@ -100,6 +100,9 @@ pub struct RunStats {
     pub failed: usize,
     /// Images uploaded earlier that got their file's path as a caption.
     pub captioned: usize,
+    /// Images SmugMug accepted earlier but no longer has; their files are
+    /// recorded as refused.
+    pub vanished: usize,
     /// Images whose caption couldn't be set (retried next run).
     pub caption_failed: usize,
     /// Refused by SmugMug (too big, unsupported); not retried until the
@@ -1036,9 +1039,21 @@ fn caption_for(paths: &[PathBuf]) -> String {
     paths.join("\n")
 }
 
+/// How setting one image's caption went.
+enum CaptionOutcome {
+    Set,
+    /// SmugMug has no such image (any more).
+    Gone,
+    Failed(String, anyhow::Error),
+}
+
 /// Set the caption of images uploaded before captions were recorded (or
 /// that gained another identical copy since), a few at a time. Failures are
-/// left for the next run. Returns how many were set and how many failed.
+/// left for the next run, except images SmugMug no longer has: SmugMug
+/// accepts a file it can't process (a corrupt JPEG) and removes the image
+/// afterwards, and deleting one is the account owner's call, so those files
+/// are recorded as refused rather than uploaded again.
+/// Returns how many were set, gone and failed.
 async fn caption_existing<T: Uploads>(
     smug: &T,
     index: &FileIndex,
@@ -1046,7 +1061,7 @@ async fn caption_existing<T: Uploads>(
     options: &RunOptions,
     stop: &StopFlag,
     stats: &std::sync::Mutex<RunStats>,
-) -> (usize, usize) {
+) -> (usize, usize, usize) {
     use futures_util::StreamExt;
     futures_util::stream::iter(jobs)
         .map(|job| async move {
@@ -1057,26 +1072,48 @@ async fn caption_existing<T: Uploads>(
                 .set_caption(&job.image_uri, &caption_for(&job.paths))
                 .await;
             Some(match result {
-                Ok(()) => job
-                    .paths
-                    .iter()
-                    .try_for_each(|p| index.mark_captioned(p))
-                    .map_err(|e| (job.image_uri, e)),
-                Err(e) => Err((job.image_uri, e)),
+                Ok(()) => match job.paths.iter().try_for_each(|p| index.mark_captioned(p)) {
+                    Ok(()) => CaptionOutcome::Set,
+                    Err(e) => CaptionOutcome::Failed(job.image_uri, e),
+                },
+                Err(e)
+                    if e.downcast_ref::<ImageMetadataRejected>()
+                        .is_some_and(ImageMetadataRejected::is_gone) =>
+                {
+                    let reason = "SmugMug no longer has the image it accepted (it may have \
+                                  failed processing, e.g. a corrupt JPEG)";
+                    match job
+                        .paths
+                        .iter()
+                        .try_for_each(|p| index.mark_gone(p, reason))
+                    {
+                        Ok(()) => {
+                            let mut stats = stats.lock().unwrap();
+                            stats.refused += job.paths.len();
+                            for path in &job.paths {
+                                stats.error(path, reason);
+                            }
+                            CaptionOutcome::Gone
+                        }
+                        Err(e) => CaptionOutcome::Failed(job.image_uri, e),
+                    }
+                }
+                Err(e) => CaptionOutcome::Failed(job.image_uri, e),
             })
         })
         .buffer_unordered(options.upload_threads.max(1))
-        .fold((0, 0), |(done, failed), outcome| async move {
+        .fold((0, 0, 0), |(done, gone, failed), outcome| async move {
             match outcome {
-                Some(Ok(())) => (done + 1, failed),
-                Some(Err((uri, e))) => {
+                Some(CaptionOutcome::Set) => (done + 1, gone, failed),
+                Some(CaptionOutcome::Gone) => (done, gone + 1, failed),
+                Some(CaptionOutcome::Failed(uri, e)) => {
                     stats
                         .lock()
                         .unwrap()
                         .error(Path::new(&uri), format!("couldn't set caption: {:#}", e));
-                    (done, failed + 1)
+                    (done, gone, failed + 1)
                 }
-                None => (done, failed),
+                None => (done, gone, failed),
             }
         })
         .await
@@ -1158,10 +1195,11 @@ pub async fn run<T: Smug + Uploads + CollectBackend>(
     stats.to_process = pending.len();
     if !caption_jobs.is_empty() {
         let shared = std::sync::Mutex::new(std::mem::take(&mut stats));
-        let (done, failed) =
+        let (done, gone, failed) =
             caption_existing(smug.as_ref(), &index, caption_jobs, options, stop, &shared).await;
         stats = shared.into_inner().unwrap();
         stats.captioned = done;
+        stats.vanished = gone;
         stats.caption_failed = failed;
     }
     stats.bytes_to_process = pending.iter().map(|p| p.file.size).sum();
@@ -1368,6 +1406,13 @@ mod tests {
 
     impl Uploads for FakeSmug {
         async fn set_caption(&self, image_uri: &str, caption: &str) -> Result<()> {
+            if image_uri.contains("gone") {
+                return Err(ImageMetadataRejected {
+                    status: 404,
+                    body: "not found".into(),
+                }
+                .into());
+            }
             self.calls
                 .lock()
                 .unwrap()
@@ -1607,6 +1652,31 @@ mod tests {
         fs::write(&path, b"still not a raw file, but different").unwrap();
         let third = setup.run().await;
         assert_eq!((third.to_process, third.refused), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn an_image_smugmug_dropped_is_recorded_not_uploaded_again() {
+        let setup = Setup::new();
+        setup.write("2014/gone.jpg", b"smugmug drops this one");
+        setup.write("2014/kept.jpg", b"smugmug keeps this one");
+        setup.run().await;
+        assert_eq!(setup.calls("upload"), 2);
+
+        let with_captions = || RunOptions {
+            caption_source: true,
+            ..setup.options()
+        };
+        let second = setup.run_with(with_captions()).await;
+        assert_eq!((second.captioned, second.vanished), (1, 1));
+
+        // Not captioned or uploaded again
+        let third = setup.run_with(with_captions()).await;
+        assert_eq!(
+            (third.captioned, third.vanished, third.to_process),
+            (0, 0, 0)
+        );
+        assert_eq!(third.previously_refused, 1);
+        assert_eq!(setup.calls("upload"), 2);
     }
 
     #[tokio::test]
