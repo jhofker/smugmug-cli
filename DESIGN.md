@@ -163,7 +163,7 @@ Rendered RAWs are cached under the RAW file's SHA256 and uploaded as `<stem>.jpg
 
 ## Distribution
 
-- **Binaries**: cargo-dist builds macOS (arm64/x64), Linux x64 and Windows x64 artifacts, shell/PowerShell installers and a Homebrew formula on version tags (`release.yml`)
+- **Binaries**: cargo-dist builds Linux x64 and Windows x64 artifacts and shell/PowerShell installers on version tags (no macOS targets: macOS runner minutes bill at 10x; Mac users use `cargo install` or Docker) (`release.yml`)
 - **Docker**: multi-arch image on ghcr.io on version tags (`docker-publish.yml`); Alpine-based, drops to `PUID`/`PGID` through `docker-entrypoint.sh`
 - **crates.io**: published on version tags through trusted publishing (`crates-publish.yml`)
 

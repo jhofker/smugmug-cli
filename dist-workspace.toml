@@ -10,10 +10,9 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# No macOS targets: GitHub bills macOS runner minutes at 10x. Mac users can `cargo install smugmug-cli` or use the Docker image.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Whether to consider the binaries in a package for distribution (defaults true)
 dist = true
-# Publish jobs to run in CI
-publish-jobs = ["homebrew"]
 # Ship the LGPL notice for rawler alongside the binaries
 include = ["THIRD-PARTY-NOTICES.md", "licenses/LGPL-2.1.txt"]
